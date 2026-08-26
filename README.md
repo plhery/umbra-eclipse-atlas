@@ -4,7 +4,7 @@ A mobile-first solar eclipse atlas for exploring the Moon’s shadow and plannin
 
 **[Open the live atlas →](https://umbra-eclipse.plhery.com/)**
 
-![Umbra solar eclipse atlas](public/og-v2.png)
+![Umbra showing the February 6, 2027 annular eclipse path across Patagonia and the South Atlantic](public/readme-screenshot.jpg)
 
 ## What it does
 
