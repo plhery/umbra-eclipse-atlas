@@ -96,9 +96,14 @@ export type UpcomingLocalEclipses = {
   throughYear: number;
 };
 
+type ShadowTrackPoint = {
+  point: Coordinates;
+  maximumMs: number;
+};
+
 const shadowTrackCache = new WeakMap<
   EclipseData,
-  { start: number; end: number } | null
+  { start: number; end: number; points: ShadowTrackPoint[] } | null
 >();
 
 const EVENT_NOTES: Record<string, string> = {
@@ -472,44 +477,55 @@ export function shadowOutlineAt(data: EclipseData, date: Date) {
   const path = data.geometry.centralLine;
   let track = shadowTrackCache.get(data);
   if (track === undefined) {
-    try {
-      const maximumAt = (point: Coordinates) =>
-        data.eclipse
+    const points: ShadowTrackPoint[] = [];
+    let start = Number.POSITIVE_INFINITY;
+    let end = Number.NEGATIVE_INFINITY;
+    for (const point of path) {
+      try {
+        const maximumMs = data.eclipse
           .getLocalEclipse(Location.create(point.lat, point.lon, 0))
           .getContactTimes()
           ?.max?.getDate()
           .getTime();
-      const start = maximumAt(path[0]);
-      const end = maximumAt(path[path.length - 1]);
-      track =
-        start !== undefined && end !== undefined && end > start
-          ? { start, end }
-          : null;
-    } catch {
-      track = null;
+        if (maximumMs === undefined) continue;
+        points.push({ point, maximumMs });
+        start = Math.min(start, maximumMs);
+        end = Math.max(end, maximumMs);
+      } catch {
+        // Near-horizon samples can be numerically unstable; other samples remain usable.
+      }
     }
+    track = points.length && end > start ? { start, end, points } : null;
     shadowTrackCache.set(data, track);
   }
   if (!track || date.getTime() < track.start || date.getTime() > track.end) return null;
 
   const toi = TimeOfInterest.fromDate(date);
-  const progress = (date.getTime() - track.start) / (track.end - track.start);
-  const guessedIndex = Math.round(progress * (path.length - 1));
-  const candidates = [0, -1, 1, -2, 2]
-    .map((offset) => Math.max(0, Math.min(path.length - 1, guessedIndex + offset)))
-    .filter((index, position, indexes) => indexes.indexOf(index) === position);
+  // The library samples the center line adaptively by geometry, not uniformly by time.
+  // Match the requested time against each sample's actual local maximum instead of
+  // interpolating an array index from the track endpoints.
+  const candidates = track.points
+    .map((candidate) => ({
+      ...candidate,
+      differenceMs: Math.abs(candidate.maximumMs - date.getTime()),
+    }))
+    .sort((left, right) => left.differenceMs - right.differenceMs)
+    .slice(0, 5);
   let best:
     | { magnitude: number; circumstances: LocalEclipseCircumstances }
     | undefined;
-  for (const index of candidates) {
-    const point = path[index];
-    const circumstances = LocalEclipseCircumstances.create(
-      data.elements,
-      { ...point, elevation: 0 },
-      toi,
-    );
-    const magnitude = circumstances.getMagnitude();
-    if (!best || magnitude > best.magnitude) best = { magnitude, circumstances };
+  for (const { point } of candidates) {
+    try {
+      const circumstances = LocalEclipseCircumstances.create(
+        data.elements,
+        { ...point, elevation: 0 },
+        toi,
+      );
+      const magnitude = circumstances.getMagnitude();
+      if (!best || magnitude > best.magnitude) best = { magnitude, circumstances };
+    } catch {
+      // Try the next time-nearest center-line sample.
+    }
   }
   if (!best || !best.circumstances.isInCentralEclipse()) return null;
   return best.circumstances.getUmbraShadowOutline({ refraction: true });
