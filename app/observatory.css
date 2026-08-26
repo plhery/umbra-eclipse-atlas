@@ -880,62 +880,6 @@ summary:focus-visible {
   width: 64%;
 }
 
-.horizon-topline {
-  position: relative;
-  display: grid;
-  align-items: start;
-  gap: 10px;
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-
-.horizon-info {
-  position: relative;
-}
-
-.horizon-info > summary {
-  display: grid;
-  width: 30px;
-  height: 30px;
-  place-items: center;
-  border: 1px solid var(--line-strong);
-  border-radius: 50%;
-  color: var(--muted);
-  cursor: pointer;
-  list-style: none;
-}
-
-.horizon-info > summary::-webkit-details-marker {
-  display: none;
-}
-
-.horizon-info[open] > summary {
-  border-color: var(--ink);
-  color: var(--ink);
-}
-
-.horizon-info > div {
-  position: absolute;
-  z-index: 5;
-  top: 36px;
-  right: 0;
-  width: min(280px, calc(100vw - 76px));
-  padding: 12px;
-  border: 1px solid var(--line-strong);
-  border-radius: 5px;
-  background: var(--surface);
-  box-shadow: var(--shadow);
-}
-
-.horizon-info > div > strong {
-  font-size: 11px;
-}
-
-.horizon-card .horizon-info > div > p {
-  margin-top: 5px;
-  font-size: 10px;
-  line-height: 1.5;
-}
-
 .place-comparison {
   margin-top: 18px;
   border-top: 1px solid var(--line);

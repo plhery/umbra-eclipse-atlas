@@ -2975,29 +2975,14 @@ function HorizonCard({
       className={profile.obstructed ? 'horizon-card obstructed' : 'horizon-card clear'}
       aria-live="polite"
     >
-      <div className="horizon-topline">
-        <div className="horizon-heading">
-          <span>Terrain skyline · facing {Math.round(profile.bearing)}° {compassDirection(profile.bearing)}</span>
-          <strong>
-            {profile.obstructed
-              ? 'Terrain may cover the Sun ahead'
-              : `Sun clears terrain ahead by ${profile.clearance.toFixed(1)}°`}
-          </strong>
-          <small>90° view around maximum · center line is where to look</small>
-        </div>
-        <details className="horizon-info">
-          <summary aria-label="What this skyline shows">
-            <Info size={15} aria-hidden="true" />
-          </summary>
-          <div>
-            <strong>A skyline, not a distance profile</strong>
-            <p>
-              It sweeps 90° from left to right. Each point is the highest sampled terrain
-              in that compass direction; the center line is where the Sun appears at maximum.
-              Individual peaks are not identified.
-            </p>
-          </div>
-        </details>
+      <div className="horizon-heading">
+        <span>Terrain skyline · facing {Math.round(profile.bearing)}° {compassDirection(profile.bearing)}</span>
+        <strong>
+          {profile.obstructed
+            ? 'Terrain may cover the Sun ahead'
+            : `Sun clears terrain ahead by ${profile.clearance.toFixed(1)}°`}
+        </strong>
+        <small>90° view around maximum · center line is where to look</small>
       </div>
       <svg
         viewBox={'0 0 ' + width + ' ' + height}
