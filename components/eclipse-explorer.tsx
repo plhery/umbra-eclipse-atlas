@@ -2070,7 +2070,20 @@ export default function EclipseExplorer() {
                           <span className="tiny-spinner" /> Building terrain skyline…
                         </p>
                       )}
-                      {profile && <HorizonCard profile={profile} sunAltitude={local.maximum?.altitude ?? 0} />}
+                      {profile && (
+                        <>
+                          <HorizonCard profile={profile} sunAltitude={local.maximum?.altitude ?? 0} />
+                          <a
+                            className="peakfinder-link"
+                            href={'https://www.peakfinder.com/?lat=' + selected.lat + '&lng=' + selected.lon}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            View named peaks in PeakFinder
+                            <ExternalLink size={13} aria-hidden="true" />
+                          </a>
+                        </>
+                      )}
 
                       {liveCircumstances && (
                         <div className="sun-moon-card">
@@ -2224,6 +2237,24 @@ export default function EclipseExplorer() {
                       />
                     </>
                   )}
+
+                  <nav className="location-map-links" aria-label="Open selected location in another map">
+                    <a
+                      href={'https://www.google.com/maps/search/?api=1&query=' + selected.lat + ',' + selected.lon}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Google Maps
+                    </a>
+                    <span aria-hidden="true">·</span>
+                    <a
+                      href={'https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=' + selected.lat + ',' + selected.lon}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      Google Street View
+                    </a>
+                  </nav>
                 </section>
               )}
 
@@ -2653,16 +2684,6 @@ export default function EclipseExplorer() {
                     <button type="button" onClick={() => exportData('csv')}><Download size={16} /><span><strong>Local CSV</strong><small>Contacts & sky angles</small></span></button>
                   </div>
                 </section>
-                {selected && (
-                  <section className="action-section">
-                    <span className="list-label">Open this spot</span>
-                    <div className="link-list">
-                      <a href={'https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=' + selected.lat + ',' + selected.lon} target="_blank" rel="noreferrer">Street View <ExternalLink size={14} /></a>
-                      <a href={'https://www.google.com/maps/@?api=1&map_action=map&center=' + selected.lat + ',' + selected.lon + '&zoom=9&basemap=roadmap&layer=traffic'} target="_blank" rel="noreferrer">Google traffic <ExternalLink size={14} /></a>
-                      <a href={'https://www.peakfinder.com/?lat=' + selected.lat + '&lng=' + selected.lon} target="_blank" rel="noreferrer">PeakFinder <ExternalLink size={14} /></a>
-                    </div>
-                  </section>
-                )}
                 <section className="action-section settings-inline">
                   <span className="list-label">Preferences</span>
                   <div className="preference-row"><span>Distance</span><div className="segmented"><button type="button" className={distanceUnit === 'metric' ? 'active' : ''} aria-pressed={distanceUnit === 'metric'} onClick={() => setDistanceUnit('metric')}>km</button><button type="button" className={distanceUnit === 'imperial' ? 'active' : ''} aria-pressed={distanceUnit === 'imperial'} onClick={() => setDistanceUnit('imperial')}>mi</button></div></div>
