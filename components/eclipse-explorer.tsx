@@ -40,6 +40,7 @@ import {
 } from 'lucide-react';
 import tzLookup from 'tz-lookup';
 import type { Map as MapLibreMap } from 'maplibre-gl';
+import mapLibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import { TimeOfInterest } from '@astronomy-bundle/core';
 import {
   compassDirection,
@@ -250,6 +251,7 @@ export default function EclipseExplorer() {
   const initialMapViewHandledRef = useRef(false);
   const contourDateRef = useRef<string | null>(null);
   const lastCursorUpdateRef = useRef(0);
+  const playbackTimeRef = useRef(0);
 
   const [eventDate, setEventDate] = useState(DEFAULT_DATE);
   const [data, setData] = useState<EclipseData | null>(null);
@@ -285,6 +287,10 @@ export default function EclipseExplorer() {
   const [profile, setProfile] = useState<HorizonProfile | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [comparisonDates, setComparisonDates] = useState<string[]>([]);
+
+  useEffect(() => {
+    playbackTimeRef.current = timeMs;
+  }, [timeMs]);
 
   const [placeQuery, setPlaceQuery] = useState('');
   const [placeResults, setPlaceResults] = useState<PlaceResult[]>([]);
@@ -451,6 +457,7 @@ export default function EclipseExplorer() {
     let disposed = false;
     import('maplibre-gl').then((maplibregl) => {
       if (disposed || !mapContainerRef.current) return;
+      maplibregl.setWorkerUrl(mapLibreWorkerUrl);
       const initial = urlStateRef.current ?? getInitialUrlState();
       const map = new maplibregl.Map({
         container: mapContainerRef.current,
@@ -597,13 +604,14 @@ export default function EclipseExplorer() {
   useEffect(() => {
     if (!mapReady || !mapRef.current || !data || !timeMs) return;
     const map = mapRef.current;
-    const timeout = window.setTimeout(() => {
-      const date = new Date(timeMs);
-      updateNightZones(map, date);
+    const date = new Date(timeMs);
+    try {
+      if (layers.night) updateNightZones(map, date);
       updateShadow(map, layers.shadow ? shadowOutlineAt(data, date) : null);
-    }, 70);
-    return () => window.clearTimeout(timeout);
-  }, [mapReady, data, timeMs, layers.shadow]);
+    } catch {
+      updateShadow(map, null);
+    }
+  }, [mapReady, data, timeMs, layers.night, layers.shadow]);
 
   const localMaximumMs = local?.maximum?.date.getTime() ?? null;
 
@@ -618,22 +626,26 @@ export default function EclipseExplorer() {
     let frame = 0;
     let previous = performance.now();
     const tick = (now: number) => {
+      if (now - previous < 100) {
+        frame = requestAnimationFrame(tick);
+        return;
+      }
       const elapsed = now - previous;
       previous = now;
       const speed = (timelineBounds.end - timelineBounds.start) / 22_000;
-      setTimeMs((current) => {
-        const next = Math.max(timelineBounds.start, current) + elapsed * speed;
-        if (next >= timelineBounds.end) {
-          setPlaying(false);
-          return timelineBounds.end;
-        }
-        return next;
-      });
+      const current = Math.max(timelineBounds.start, playbackTimeRef.current);
+      const next = Math.min(timelineBounds.end, current + elapsed * speed);
+      playbackTimeRef.current = next;
+      setTimeMs(next);
+      if (next >= timelineBounds.end) {
+        setPlaying(false);
+        return;
+      }
       frame = requestAnimationFrame(tick);
     };
     frame = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frame);
-  }, [playing, data, timelineBounds]);
+  }, [playing, data, timelineBounds.end, timelineBounds.start]);
 
   useEffect(() => {
     let active = true;
@@ -656,9 +668,18 @@ export default function EclipseExplorer() {
   }, [mapReady, profile]);
 
   const togglePlayback = useCallback(() => {
-    setTimeMs((current) => (current >= timelineBounds.end ? timelineBounds.start : current));
-    setPlaying((value) => !value);
-  }, [timelineBounds]);
+    if (playing) {
+      setPlaying(false);
+      return;
+    }
+    const start =
+      playbackTimeRef.current >= timelineBounds.end
+        ? timelineBounds.start
+        : Math.max(timelineBounds.start, playbackTimeRef.current);
+    playbackTimeRef.current = start;
+    setTimeMs(start);
+    setPlaying(true);
+  }, [playing, timelineBounds.end, timelineBounds.start]);
 
   const startLocationTracking = useCallback(() => {
     if (!('geolocation' in navigator)) {
@@ -731,7 +752,7 @@ export default function EclipseExplorer() {
   }, [startLocationTracking, togglePlayback, timelineBounds]);
 
   useEffect(() => {
-    if (!data) return;
+    if (!data || playing) return;
     const params = new URLSearchParams();
     params.set('e', eventDate);
     if (selected) {
@@ -765,6 +786,7 @@ export default function EclipseExplorer() {
     layers,
     nightOpacity,
     timeMs,
+    playing,
   ]);
 
   const changeEvent = useCallback(async (date: string) => {

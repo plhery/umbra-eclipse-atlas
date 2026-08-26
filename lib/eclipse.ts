@@ -80,6 +80,11 @@ export type CatalogEntry = {
   magnitude: number;
 };
 
+const shadowTrackCache = new WeakMap<
+  EclipseData,
+  { start: number; end: number } | null
+>();
+
 const EVENT_NOTES: Record<string, string> = {
   '2017-08-21': 'United States',
   '2019-07-02': 'Chile & Argentina',
@@ -379,22 +384,35 @@ export function computeLocalResult(
 
 export function shadowOutlineAt(data: EclipseData, date: Date) {
   if (!data.geometry.centralLine.length) return null;
-  const toi = TimeOfInterest.fromDate(date);
-  const progress = Math.max(
-    0,
-    Math.min(
-      1,
-      (date.getTime() - data.rangeStart.getTime()) /
-        (data.rangeEnd.getTime() - data.rangeStart.getTime()),
-    ),
-  );
   const path = data.geometry.centralLine;
-  const guessedIndex = Math.round(progress * (path.length - 1));
-  const candidates = new Set<number>();
-  for (let radius = 0; radius <= Math.ceil(path.length / 2); radius += 4) {
-    candidates.add(Math.max(0, guessedIndex - radius));
-    candidates.add(Math.min(path.length - 1, guessedIndex + radius));
+  let track = shadowTrackCache.get(data);
+  if (track === undefined) {
+    try {
+      const maximumAt = (point: Coordinates) =>
+        data.eclipse
+          .getLocalEclipse(Location.create(point.lat, point.lon, 0))
+          .getContactTimes()
+          ?.max?.getDate()
+          .getTime();
+      const start = maximumAt(path[0]);
+      const end = maximumAt(path[path.length - 1]);
+      track =
+        start !== undefined && end !== undefined && end > start
+          ? { start, end }
+          : null;
+    } catch {
+      track = null;
+    }
+    shadowTrackCache.set(data, track);
   }
+  if (!track || date.getTime() < track.start || date.getTime() > track.end) return null;
+
+  const toi = TimeOfInterest.fromDate(date);
+  const progress = (date.getTime() - track.start) / (track.end - track.start);
+  const guessedIndex = Math.round(progress * (path.length - 1));
+  const candidates = [0, -1, 1, -2, 2]
+    .map((offset) => Math.max(0, Math.min(path.length - 1, guessedIndex + offset)))
+    .filter((index, position, indexes) => indexes.indexOf(index) === position);
   let best:
     | { magnitude: number; circumstances: LocalEclipseCircumstances }
     | undefined;
