@@ -50,6 +50,7 @@ import {
   computeLocalResult,
   destinationPoint,
   eventRegion,
+  findUpcomingEclipsesAtLocation,
   formatCoordinate,
   formatDateLabel,
   formatDuration,
@@ -67,6 +68,8 @@ import {
   type EclipseKind,
   type LocalResult,
   type SelectedLocation,
+  type UpcomingLocalEclipse,
+  type UpcomingLocalEclipses,
 } from '@/lib/eclipse';
 import {
   BASE_STYLE,
@@ -331,6 +334,7 @@ function compareEclipseDates(a: string, b: string) {
 
 export default function EclipseExplorer() {
   const mapContainerRef = useRef<HTMLDivElement>(null);
+  const eventPanelRef = useRef<HTMLElement>(null);
   const eventPanelScrollRef = useRef<HTMLDivElement>(null);
   const drawerRef = useRef<HTMLElement>(null);
   const drawerReturnFocusRef = useRef<HTMLElement | null>(null);
@@ -394,6 +398,11 @@ export default function EclipseExplorer() {
   const [savedPlaces, setSavedPlaces] = useState<SelectedLocation[]>([]);
   const [profile, setProfile] = useState<HorizonProfile | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
+  const [upcomingLookup, setUpcomingLookup] = useState<{
+    key: string;
+    results: UpcomingLocalEclipses | null;
+    error: string;
+  }>({ key: '', results: null, error: '' });
   const [comparisonDates, setComparisonDates] = useState<string[]>([]);
   const [presentationMode, setPresentationMode] = useState(false);
 
@@ -447,6 +456,62 @@ export default function EclipseExplorer() {
       return null;
     }
   }, [data, selected]);
+
+  const selectedLat = selected?.lat;
+  const selectedLon = selected?.lon;
+  const selectedElevation = selected?.elevation;
+  const upcomingRequestKey =
+    selectedLat === undefined || selectedLon === undefined || selectedElevation === undefined
+      ? ''
+      : `${eventDate}|${selectedLat.toFixed(6)}|${selectedLon.toFixed(6)}|${Math.round(selectedElevation)}`;
+  const upcomingIsCurrent = upcomingLookup.key === upcomingRequestKey;
+  const upcomingEclipses = upcomingIsCurrent ? upcomingLookup.results : null;
+  const upcomingError = upcomingIsCurrent ? upcomingLookup.error : '';
+  const upcomingLoading = Boolean(selected) &&
+    (elevationStatus === 'loading' || !upcomingIsCurrent);
+
+  useEffect(() => {
+    if (
+      selectedLat === undefined ||
+      selectedLon === undefined ||
+      selectedElevation === undefined ||
+      elevationStatus === 'loading'
+    ) return;
+
+    let active = true;
+    const requestKey = upcomingRequestKey;
+    const timeout = window.setTimeout(() => {
+      findUpcomingEclipsesAtLocation(
+        { lat: selectedLat, lon: selectedLon, elevation: selectedElevation },
+        eventDate,
+      )
+        .then((results) => {
+          if (active) setUpcomingLookup({ key: requestKey, results, error: '' });
+        })
+        .catch(() => {
+          if (active) {
+            setUpcomingLookup({
+              key: requestKey,
+              results: null,
+              error: 'Future eclipses could not be calculated.',
+            });
+          }
+        });
+    }, 240);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timeout);
+    };
+  }, [
+    eventDate,
+    elevationStatus,
+    selectedElevation,
+    selectedLat,
+    selectedLon,
+    upcomingRequestKey,
+  ]);
+
   const localObservability = observability(local);
   const maximumViewLine = useMemo(() => {
     if (!selected || !local?.maximum) return [];
@@ -596,13 +661,6 @@ export default function EclipseExplorer() {
       setElevationStatus(elevation === undefined ? 'loading' : 'provided');
       setSheetSnap('peek');
       eventPanelScrollRef.current?.scrollTo({ top: 0 });
-      const mobile = window.innerWidth <= 760;
-      mapRef.current?.easeTo({
-        center: [provisional.lon, provisional.lat],
-        zoom: Math.max(mapRef.current.getZoom(), 6),
-        offset: mobile ? [0, -114] : [0, 0],
-        duration: 650,
-      });
 
       Promise.allSettled([
         name === 'Selected point' || name === 'Shared location'
@@ -640,6 +698,58 @@ export default function EclipseExplorer() {
     },
     [],
   );
+
+  const focusSelectedLocation = useCallback((location: { lat: number; lon: number }) => {
+    const map = mapRef.current;
+    const container = mapContainerRef.current;
+    if (!map || !container) return;
+
+    const mapRect = container.getBoundingClientRect();
+    const panelRect = eventPanelRef.current?.getBoundingClientRect();
+    const timelineRect = document.querySelector<HTMLElement>('.timeline-dock')?.getBoundingClientRect();
+    const mobile = window.innerWidth <= 760;
+    let visibleLeft = mapRect.left;
+    const visibleRight = mapRect.right;
+    const visibleTop = Math.max(mapRect.top, mobile ? 60 : 62);
+    let visibleBottom = mapRect.bottom;
+
+    if (mobile) {
+      if (panelRect) visibleBottom = Math.min(visibleBottom, panelRect.top);
+      if (timelineRect?.width && timelineRect.height) {
+        visibleBottom = Math.min(visibleBottom, timelineRect.top - 8);
+      }
+    } else if (panelRect) {
+      visibleLeft = Math.max(visibleLeft, panelRect.right);
+      if (timelineRect?.width && timelineRect.height) {
+        visibleBottom = Math.min(visibleBottom, timelineRect.top);
+      }
+    }
+
+    const targetX = (visibleLeft + visibleRight) / 2 - mapRect.left;
+    const targetY = (visibleTop + Math.max(visibleTop + 80, visibleBottom)) / 2 - mapRect.top;
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    map.easeTo({
+      center: [location.lon, location.lat],
+      zoom: Math.max(map.getZoom(), 6),
+      offset: [targetX - mapRect.width / 2, targetY - mapRect.height / 2],
+      duration: reducedMotion ? 0 : 620,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (
+      !mapReady ||
+      sheetSnap === 'full' ||
+      selectedLat === undefined ||
+      selectedLon === undefined
+    ) return;
+    const timeout = window.setTimeout(
+      () => focusSelectedLocation({ lat: selectedLat, lon: selectedLon }),
+      250,
+    );
+    return () => window.clearTimeout(timeout);
+  }, [mapReady, selectedLat, selectedLon, sheetSnap, focusSelectedLocation]);
+
   useEffect(() => {
     choosePointRef.current = choosePoint;
   }, [choosePoint]);
@@ -1129,6 +1239,20 @@ export default function EclipseExplorer() {
       }, 30);
     }
   }, [catalogSearched]);
+
+  const openVisibleEclipses = useCallback(() => {
+    if (!selected) return;
+    const year = parseEclipseDate(eventDate).year;
+    setFromYear(Math.max(-1999, year));
+    setToYear(Math.min(3000, year + 100));
+    setVisibleHere(true);
+    setCentralOnly(false);
+    setCatalogSearched(false);
+    setDrawer('catalog');
+    window.setTimeout(() => {
+      document.querySelector<HTMLButtonElement>('[data-catalog-search]')?.click();
+    }, 80);
+  }, [eventDate, selected]);
 
   const runCatalogSearch = useCallback(async () => {
     setCatalogError('');
@@ -1740,7 +1864,7 @@ export default function EclipseExplorer() {
         </section>
       )}
 
-      <aside id="eclipse-details" className="event-panel" aria-label="Eclipse details">
+      <aside ref={eventPanelRef} id="eclipse-details" className="event-panel" aria-label="Eclipse details">
         <button
           className="sheet-grabber"
           type="button"
@@ -1880,13 +2004,7 @@ export default function EclipseExplorer() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => {
-                          setVisibleHere(true);
-                          setCentralOnly(false);
-                          setCatalogSearched(false);
-                          setDrawer('catalog');
-                          window.setTimeout(() => document.querySelector<HTMLButtonElement>('[data-catalog-search]')?.click(), 80);
-                        }}
+                        onClick={openVisibleEclipses}
                       >
                         Find an eclipse visible here
                       </button>
@@ -1985,6 +2103,15 @@ export default function EclipseExplorer() {
                         ))}
                       </div>
 
+                      <UpcomingEclipsesPanel
+                        results={upcomingEclipses}
+                        loading={upcomingLoading}
+                        error={upcomingError}
+                        afterDate={eventDate}
+                        onOpen={changeEvent}
+                        onBrowse={openVisibleEclipses}
+                      />
+
                       <LocationComparison
                         items={locationComparisons}
                         selected={selected}
@@ -2048,13 +2175,23 @@ export default function EclipseExplorer() {
                     </>
                   )}
                   {local?.type === 'none' && (
-                    <LocationComparison
-                      items={locationComparisons}
-                      selected={selected}
-                      bestKey={bestComparisonKey}
-                      timeMode={timeMode}
-                      onChoose={choosePlace}
-                    />
+                    <>
+                      <UpcomingEclipsesPanel
+                        results={upcomingEclipses}
+                        loading={upcomingLoading}
+                        error={upcomingError}
+                        afterDate={eventDate}
+                        onOpen={changeEvent}
+                        onBrowse={openVisibleEclipses}
+                      />
+                      <LocationComparison
+                        items={locationComparisons}
+                        selected={selected}
+                        bestKey={bestComparisonKey}
+                        timeMode={timeMode}
+                        onChoose={choosePlace}
+                      />
+                    </>
                   )}
                 </section>
               )}
@@ -2659,6 +2796,110 @@ function LocationComparison({
   );
 }
 
+function UpcomingEclipseRow({
+  item,
+  kind,
+  onOpen,
+}: {
+  item: UpcomingLocalEclipse;
+  kind: 'total' | 'partial';
+  onOpen: (date: string) => void;
+}) {
+  const detail =
+    kind === 'total'
+      ? `${formatDuration(item.durationSeconds, true)} totality · Sun ${item.altitude.toFixed(0)}° high`
+      : `${percent(item.obscuration)} covered · Sun ${item.altitude.toFixed(0)}° high`;
+
+  return (
+    <button
+      type="button"
+      className="upcoming-eclipse-row"
+      onClick={() => onOpen(item.date)}
+      aria-label={`Open the ${formatDateLabel(item.date)} eclipse`}
+    >
+      <span>
+        <strong>{formatDateLabel(item.date)}</strong>
+        <small>{detail}</small>
+      </span>
+      <ChevronRight size={15} aria-hidden="true" />
+    </button>
+  );
+}
+
+function UpcomingEclipsesPanel({
+  results,
+  loading,
+  error,
+  afterDate,
+  onOpen,
+  onBrowse,
+}: {
+  results: UpcomingLocalEclipses | null;
+  loading: boolean;
+  error: string;
+  afterDate: string;
+  onOpen: (date: string) => void;
+  onBrowse: () => void;
+}) {
+  return (
+    <section className="upcoming-eclipses" aria-labelledby="upcoming-eclipses-title">
+      <div className="upcoming-eclipses-heading">
+        <h3 id="upcoming-eclipses-title">Next eclipses here</h3>
+        <small>after {formatDateLabel(afterDate)}</small>
+      </div>
+
+      {loading && (
+        <div className="upcoming-eclipses-loading" role="status">
+          <span>Looking ahead</span>
+          <i /><i /><i />
+        </div>
+      )}
+
+      {!loading && error && <p className="upcoming-eclipses-error">{error}</p>}
+
+      {!loading && !error && results && (
+        <>
+          <div className="upcoming-eclipse-group">
+            <span className="upcoming-eclipse-label">Next total eclipses</span>
+            {results.totals.length ? (
+              results.totals.map((item) => (
+                <UpcomingEclipseRow key={item.date} item={item} kind="total" onOpen={onOpen} />
+              ))
+            ) : (
+              <p className="upcoming-eclipses-empty">
+                No total eclipse at this point before {results.throughYear}.
+              </p>
+            )}
+          </div>
+
+          <details className="upcoming-partials">
+            <summary>
+              <span>Next partial eclipses</span>
+              <ChevronDown size={15} aria-hidden="true" />
+            </summary>
+            <div>
+              {results.partials.length ? (
+                results.partials.map((item) => (
+                  <UpcomingEclipseRow key={item.date} item={item} kind="partial" onOpen={onOpen} />
+                ))
+              ) : (
+                <p className="upcoming-eclipses-empty">
+                  No partial eclipse at this point before {results.throughYear}.
+                </p>
+              )}
+            </div>
+          </details>
+
+          <button type="button" className="upcoming-eclipses-browse" onClick={onBrowse}>
+            Browse the next 100 years
+            <ChevronRight size={14} aria-hidden="true" />
+          </button>
+        </>
+      )}
+    </section>
+  );
+}
+
 function ToggleRow({
   label,
   detail,
@@ -2719,14 +2960,29 @@ function HorizonCard({
       className={profile.obstructed ? 'horizon-card obstructed' : 'horizon-card clear'}
       aria-live="polite"
     >
-      <div className="horizon-heading">
-        <span>Terrain skyline · facing {Math.round(profile.bearing)}° {compassDirection(profile.bearing)}</span>
-        <strong>
-          {profile.obstructed
-            ? 'Terrain may cover the Sun ahead'
-            : `Sun clears terrain ahead by ${profile.clearance.toFixed(1)}°`}
-        </strong>
-        <small>90° view around maximum · center line is where to look</small>
+      <div className="horizon-topline">
+        <div className="horizon-heading">
+          <span>Terrain skyline · facing {Math.round(profile.bearing)}° {compassDirection(profile.bearing)}</span>
+          <strong>
+            {profile.obstructed
+              ? 'Terrain may cover the Sun ahead'
+              : `Sun clears terrain ahead by ${profile.clearance.toFixed(1)}°`}
+          </strong>
+          <small>90° view around maximum · center line is where to look</small>
+        </div>
+        <details className="horizon-info">
+          <summary aria-label="What this skyline shows">
+            <Info size={15} aria-hidden="true" />
+          </summary>
+          <div>
+            <strong>A skyline, not a distance profile</strong>
+            <p>
+              It sweeps 90° from left to right. Each point is the highest sampled terrain
+              in that compass direction; the center line is where the Sun appears at maximum.
+              Individual peaks are not identified.
+            </p>
+          </div>
+        </details>
       </div>
       <svg
         viewBox={'0 0 ' + width + ' ' + height}
@@ -2756,7 +3012,7 @@ function HorizonCard({
         <div><dt>Terrain ahead</dt><dd>{profile.maxTerrainAngle.toFixed(1)}°</dd></div>
         <div><dt>Scan range</dt><dd>{Math.round(profile.distanceKm)} km</dd></div>
       </dl>
-      <p>The ridge is the highest sampled terrain in each direction. Trees, buildings and peak names are not included.</p>
+      <p>Terrain-model estimate; trees, buildings and peak names are not included.</p>
     </div>
   );
 }

@@ -80,6 +80,22 @@ export type CatalogEntry = {
   magnitude: number;
 };
 
+export type UpcomingLocalEclipse = {
+  date: string;
+  type: Exclude<LocalEclipseKind, 'none'>;
+  maximum: Date;
+  magnitude: number;
+  obscuration: number;
+  altitude: number;
+  durationSeconds: number;
+};
+
+export type UpcomingLocalEclipses = {
+  totals: UpcomingLocalEclipse[];
+  partials: UpcomingLocalEclipse[];
+  throughYear: number;
+};
+
 const shadowTrackCache = new WeakMap<
   EclipseData,
   { start: number; end: number } | null
@@ -279,6 +295,64 @@ export async function searchCatalogue(
   }
   onProgress?.(1);
   return results;
+}
+
+export async function findUpcomingEclipsesAtLocation(
+  location: Pick<SelectedLocation, 'lat' | 'lon' | 'elevation'>,
+  afterDate: string,
+  totalLimit = 2,
+  partialLimit = 3,
+): Promise<UpcomingLocalEclipses> {
+  const catalogue = (await import('@astronomy-bundle/solar-eclipse/catalogue-full')).Catalogue;
+  const dates = catalogue.getAvailableEclipseDates(afterDate, '3000-12-31');
+  const observer = Location.create(location.lat, location.lon, location.elevation);
+  const after = parseEclipseDate(afterDate);
+  const afterValue = after.year * 372 + after.month * 31 + after.day;
+  const totals: UpcomingLocalEclipse[] = [];
+  const partials: UpcomingLocalEclipse[] = [];
+
+  for (let index = 0; index < dates.length; index += 1) {
+    const date = dates[index];
+    const parsed = parseEclipseDate(date);
+    if (parsed.year * 372 + parsed.month * 31 + parsed.day <= afterValue) continue;
+
+    try {
+      const eclipse = SolarEclipse.createFromBesselianElements(
+        catalogue.getBesselianElements(date),
+      );
+      const localEclipse = eclipse.getLocalEclipse(observer);
+      const type = localEclipse.getType() as LocalEclipseKind;
+      if (type === 'none' || type === 'annular') continue;
+
+      const maximum = localEclipse.getContactTimes()?.max;
+      if (!maximum) continue;
+      const circumstances = localEclipse.getCircumstances(maximum);
+      const horizontal = circumstances.getApparentTopocentricHorizontalCoordinates();
+      if (horizontal.altitude < -0.833) continue;
+
+      const item: UpcomingLocalEclipse = {
+        date,
+        type,
+        maximum: maximum.getDate(),
+        magnitude: Math.max(0, circumstances.getMagnitude()),
+        obscuration: Math.max(0, circumstances.getObscuration()),
+        altitude: horizontal.altitude,
+        durationSeconds:
+          type === 'total' ? localEclipse.getCentralDuration() : localEclipse.getDuration(),
+      };
+      if (type === 'total' && totals.length < totalLimit) totals.push(item);
+      if (type === 'partial' && partials.length < partialLimit) partials.push(item);
+      if (totals.length >= totalLimit && partials.length >= partialLimit) break;
+    } catch {
+      // Some edge-of-path circumstances are not numerically stable; skip them.
+    }
+
+    if (index % 80 === 0) {
+      await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+    }
+  }
+
+  return { totals, partials, throughYear: 3000 };
 }
 
 export function computeLocalResult(

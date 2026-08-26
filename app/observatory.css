@@ -665,6 +665,222 @@ summary:focus-visible {
   font-size: 12px;
 }
 
+.upcoming-eclipses {
+  margin-top: 20px;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.upcoming-eclipses-heading {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.upcoming-eclipses-heading h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.upcoming-eclipses-heading small {
+  color: var(--quiet);
+  font: 9px var(--font-geist-mono);
+  text-align: right;
+}
+
+.upcoming-eclipse-label {
+  display: block;
+  padding: 8px 0 6px;
+  color: var(--quiet);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.upcoming-eclipse-row {
+  display: grid;
+  width: 100%;
+  min-height: 54px;
+  align-items: center;
+  padding: 9px 4px 9px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  grid-template-columns: minmax(0, 1fr) auto;
+  text-align: left;
+}
+
+.upcoming-eclipse-row:hover {
+  background: var(--surface-2);
+}
+
+.upcoming-eclipse-row > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.upcoming-eclipse-row strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.upcoming-eclipse-row small {
+  overflow: hidden;
+  color: var(--muted);
+  font: 10px var(--font-geist-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.upcoming-eclipse-row > svg {
+  color: var(--quiet);
+}
+
+.upcoming-partials {
+  border-top: 1px solid var(--line);
+}
+
+.upcoming-partials > summary {
+  display: flex;
+  min-height: 46px;
+  align-items: center;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  list-style: none;
+}
+
+.upcoming-partials > summary::-webkit-details-marker {
+  display: none;
+}
+
+.upcoming-partials > summary svg {
+  margin-left: auto;
+  transition: transform 160ms ease;
+}
+
+.upcoming-partials[open] > summary svg {
+  transform: rotate(180deg);
+}
+
+.upcoming-eclipses-browse {
+  display: flex;
+  width: 100%;
+  min-height: 46px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.upcoming-eclipses-browse:hover {
+  color: var(--ink);
+}
+
+.upcoming-eclipses-empty,
+.upcoming-eclipses-error {
+  margin: 0;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.upcoming-eclipses-loading {
+  display: grid;
+  gap: 7px;
+  padding: 0 0 14px;
+}
+
+.upcoming-eclipses-loading > span {
+  color: var(--quiet);
+  font-size: 10px;
+}
+
+.upcoming-eclipses-loading > i {
+  width: 100%;
+  height: 8px;
+  border-radius: 2px;
+  background: var(--surface-2);
+}
+
+.upcoming-eclipses-loading > i:nth-of-type(2) {
+  width: 82%;
+}
+
+.upcoming-eclipses-loading > i:nth-of-type(3) {
+  width: 64%;
+}
+
+.horizon-topline {
+  position: relative;
+  display: grid;
+  align-items: start;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.horizon-info {
+  position: relative;
+}
+
+.horizon-info > summary {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+}
+
+.horizon-info > summary::-webkit-details-marker {
+  display: none;
+}
+
+.horizon-info[open] > summary {
+  border-color: var(--ink);
+  color: var(--ink);
+}
+
+.horizon-info > div {
+  position: absolute;
+  z-index: 5;
+  top: 36px;
+  right: 0;
+  width: min(280px, calc(100vw - 76px));
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.horizon-info > div > strong {
+  font-size: 11px;
+}
+
+.horizon-card .horizon-info > div > p {
+  margin-top: 5px;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .place-comparison {
   margin-top: 18px;
   border-top: 1px solid var(--line);
@@ -1707,6 +1923,7 @@ button.comparison-row:hover,
   .layer-details > summary svg,
   .coordinate-search > summary svg,
   .place-comparison > summary svg,
+  .upcoming-partials > summary svg,
   .presentation-card,
   .skip-link,
   .toggle-row > b,
