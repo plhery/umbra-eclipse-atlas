@@ -1,0 +1,1857 @@
+'use client';
+
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FormEvent,
+} from 'react';
+import {
+  Bookmark,
+  CalendarDays,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Clipboard,
+  Download,
+  ExternalLink,
+  FileDown,
+  Globe2,
+  Info,
+  Layers3,
+  ListFilter,
+  LocateFixed,
+  MapPin,
+  Menu,
+  Moon,
+  Navigation,
+  Pause,
+  Play,
+  Printer,
+  Route,
+  Search,
+  Share2,
+  Sun,
+  X,
+} from 'lucide-react';
+import tzLookup from 'tz-lookup';
+import type { Map as MapLibreMap } from 'maplibre-gl';
+import { TimeOfInterest } from '@astronomy-bundle/core';
+import {
+  compassDirection,
+  computeLocalResult,
+  eventRegion,
+  eventTitle,
+  formatCoordinate,
+  formatDateLabel,
+  formatDuration,
+  formatTime,
+  getAdjacentEclipseDate,
+  loadEclipse,
+  parseEclipseDate,
+  relativeDateLabel,
+  searchCatalogue,
+  shadowOutlineAt,
+  toDms,
+  type CatalogEntry,
+  type EclipseData,
+  type EclipseKind,
+  type SelectedLocation,
+} from '@/lib/eclipse';
+import {
+  BASE_STYLE,
+  colorForType,
+  fitEclipse,
+  installEclipseLayers,
+  updateBaseMap,
+  updateComparisons,
+  updateEclipseGeometry,
+  updateNightZones,
+  updateProfileLine,
+  updateScientificContours,
+  updateSelectedLocation,
+  updateShadow,
+  updateVisibility,
+  type BaseMap,
+  type LayerVisibility,
+} from '@/lib/map-data';
+import {
+  fetchElevation,
+  fetchHorizonProfile,
+  reverseGeocode,
+  searchPlaces,
+  type HorizonProfile,
+  type PlaceResult,
+} from '@/lib/services';
+
+const DEFAULT_DATE = '2027-02-06';
+const DEFAULT_LAYERS: LayerVisibility = {
+  path: true,
+  center: true,
+  partial: true,
+  horizons: true,
+  guides: true,
+  magnitude: false,
+  timeContours: false,
+  night: false,
+  shadow: true,
+  lightPollution: false,
+};
+const ALL_TYPES: EclipseKind[] = ['total', 'annular', 'hybrid', 'partial'];
+const TYPE_LABELS: Record<EclipseKind, string> = {
+  total: 'Total',
+  annular: 'Annular',
+  hybrid: 'Hybrid',
+  partial: 'Partial',
+};
+const BASE_LABELS: Array<{ id: BaseMap; label: string; detail: string }> = [
+  { id: 'street', label: 'Map', detail: 'Roads & places' },
+  { id: 'terrain', label: 'Terrain', detail: 'Relief & peaks' },
+  { id: 'satellite', label: 'Satellite', detail: 'World imagery' },
+  { id: 'night', label: 'Night', detail: 'Earth at night' },
+];
+
+type Drawer = 'catalog' | 'search' | 'layers' | 'more' | null;
+type SheetSnap = 'peek' | 'mid' | 'full';
+type TimeMode = 'local' | 'utc';
+type DistanceUnit = 'metric' | 'imperial';
+
+function getInitialUrlState() {
+  if (typeof window === 'undefined') return null;
+  const params = new URLSearchParams(window.location.search);
+  const numberParam = (key: string, min: number, max: number) => {
+    const raw = params.get(key);
+    if (raw === null || raw.trim() === '') return null;
+    const value = Number(raw);
+    return Number.isFinite(value) && value >= min && value <= max ? value : null;
+  };
+  const lat = numberParam('lat', -90, 90);
+  const lon = numberParam(params.has('lon') ? 'lon' : 'lng', -180, 180);
+  const mapLat = numberParam('mapLat', -85, 85);
+  const mapLon = numberParam('mapLon', -180, 180);
+  const zoom = numberParam('z', 1.2, 18);
+  const elevation = numberParam('elv', -500, 9000);
+  const time = params.get('t');
+  const requestedTimezone = params.get('tz');
+  let timezoneOverride = '';
+  if (requestedTimezone) {
+    try {
+      new Intl.DateTimeFormat('en', { timeZone: requestedTimezone }).format();
+      timezoneOverride = requestedTimezone;
+    } catch {
+      timezoneOverride = '';
+    }
+  }
+  const selected =
+    lat !== null && lon !== null
+      ? ({ lat, lon, elevation: elevation ?? 0, name: 'Shared location' } satisfies SelectedLocation)
+      : null;
+  const center =
+    mapLat !== null && mapLon !== null
+      ? ([mapLon, mapLat] as [number, number])
+      : selected
+        ? ([selected.lon, selected.lat] as [number, number])
+        : ([0, 15] as [number, number]);
+  const activeLayerNames = new Set(
+    params.has('layers') ? (params.get('layers') || '').split(',').filter(Boolean) : [],
+  );
+  const layerState = { ...DEFAULT_LAYERS };
+  if (params.has('layers')) {
+    (Object.keys(layerState) as Array<keyof LayerVisibility>).forEach((key) => {
+      layerState[key] = activeLayerNames.has(key);
+    });
+  }
+  return {
+    event: params.get('e') || DEFAULT_DATE,
+    selected,
+    hasElevation: elevation !== null,
+    zoom: zoom ?? (selected ? 6 : 2),
+    center,
+    hasMapView: !!selected || (mapLat !== null && mapLon !== null),
+    base: (params.get('style') as BaseMap | null) || 'street',
+    layers: layerState,
+    nightOpacity: numberParam('nightOpacity', 0.15, 0.95) ?? 0.62,
+    timezoneOverride,
+    time: time && !Number.isNaN(Date.parse(time)) ? new Date(time).getTime() : null,
+  };
+}
+
+function percent(value: number, digits = 1) {
+  if (!Number.isFinite(value)) return '—';
+  return (value * 100).toFixed(digits) + '%';
+}
+
+function xmlEscape(value: string) {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;');
+}
+
+function icsDate(date: Date) {
+  return date.toISOString().replaceAll('-', '').replaceAll(':', '').replace(/\.\d{3}/, '');
+}
+
+function downloadText(filename: string, type: string, value: string) {
+  downloadBlob(filename, new Blob([value], { type }));
+}
+
+function downloadBlob(filename: string, blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
+function distanceLabel(km: number, unit: DistanceUnit) {
+  if (!Number.isFinite(km)) return '—';
+  if (unit === 'imperial') return (km * 0.621371).toFixed(km < 16 ? 1 : 0) + ' mi';
+  return km.toFixed(km < 10 ? 1 : 0) + ' km';
+}
+
+function typeSentence(type: string) {
+  if (type === 'total') return 'You can see totality here';
+  if (type === 'annular') return 'You can see the ring of fire here';
+  if (type === 'partial') return 'A partial eclipse is visible here';
+  return 'This eclipse is not visible here';
+}
+
+function typeDetail(type: string) {
+  if (type === 'total') return 'The Sun is fully covered between C2 and C3.';
+  if (type === 'annular') return 'A bright ring remains between C2 and C3.';
+  if (type === 'partial') return 'The Moon covers part of the Sun.';
+  return 'Try another point inside the shaded visibility area.';
+}
+
+function compareEclipseDates(a: string, b: string) {
+  const left = parseEclipseDate(a);
+  const right = parseEclipseDate(b);
+  return left.year - right.year || left.month - right.month || left.day - right.day;
+}
+
+export default function EclipseExplorer() {
+  const mapContainerRef = useRef<HTMLDivElement>(null);
+  const mapRef = useRef<MapLibreMap | null>(null);
+  const choosePointRef = useRef<
+    (lat: number, lon: number, name?: string, accuracy?: number, elevation?: number) => void
+  >(() => undefined);
+  const watchIdRef = useRef<number | null>(null);
+  const urlStateRef = useRef<ReturnType<typeof getInitialUrlState>>(null);
+  const initialMapViewHandledRef = useRef(false);
+  const contourDateRef = useRef<string | null>(null);
+  const lastCursorUpdateRef = useRef(0);
+
+  const [eventDate, setEventDate] = useState(DEFAULT_DATE);
+  const [data, setData] = useState<EclipseData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [mapReady, setMapReady] = useState(false);
+  const [loadError, setLoadError] = useState('');
+  const [selected, setSelected] = useState<SelectedLocation | null>(null);
+  const [drawer, setDrawer] = useState<Drawer>(null);
+  const [sheetSnap, setSheetSnap] = useState<SheetSnap>('peek');
+  const [baseMap, setBaseMap] = useState<BaseMap>('street');
+  const [layers, setLayers] = useState<LayerVisibility>(DEFAULT_LAYERS);
+  const [nightOpacity, setNightOpacity] = useState(0.62);
+  const [timeMs, setTimeMs] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [timeMode, setTimeMode] = useState<TimeMode>('local');
+  const [timezoneOverride, setTimezoneOverride] = useState('');
+  const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>('metric');
+  const [cursor, setCursor] = useState<{ lat: number; lon: number } | null>(null);
+  const [contourReadout, setContourReadout] = useState<{
+    label: string;
+    kind: 'Magnitude' | 'Maximum time';
+    x: number;
+    y: number;
+  } | null>(null);
+  const [mapCenter, setMapCenter] = useState<{ lat: number; lon: number; zoom: number }>({
+    lat: 15,
+    lon: 0,
+    zoom: 2,
+  });
+  const [tracking, setTracking] = useState(false);
+  const [toast, setToast] = useState('');
+  const [savedPlaces, setSavedPlaces] = useState<SelectedLocation[]>([]);
+  const [profile, setProfile] = useState<HorizonProfile | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [comparisonDates, setComparisonDates] = useState<string[]>([]);
+
+  const [placeQuery, setPlaceQuery] = useState('');
+  const [placeResults, setPlaceResults] = useState<PlaceResult[]>([]);
+  const [placeLoading, setPlaceLoading] = useState(false);
+  const [placeError, setPlaceError] = useState('');
+
+  const currentYear = new Date().getUTCFullYear();
+  const [fromYear, setFromYear] = useState(currentYear);
+  const [toYear, setToYear] = useState(currentYear + 20);
+  const [typeFilters, setTypeFilters] = useState<EclipseKind[]>(ALL_TYPES);
+  const [minDuration, setMinDuration] = useState(0);
+  const [sarosFilter, setSarosFilter] = useState('');
+  const [catalogSort, setCatalogSort] = useState<'date' | 'duration' | 'magnitude'>('date');
+  const [visibleHere, setVisibleHere] = useState(false);
+  const [centralOnly, setCentralOnly] = useState(false);
+  const [catalogResults, setCatalogResults] = useState<CatalogEntry[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogProgress, setCatalogProgress] = useState(0);
+  const [catalogError, setCatalogError] = useState('');
+  const [catalogSearched, setCatalogSearched] = useState(false);
+
+  const timezone = useMemo(() => {
+    if (!selected) return 'UTC';
+    try {
+      return tzLookup(selected.lat, selected.lon);
+    } catch {
+      return 'UTC';
+    }
+  }, [selected]);
+  const supportedTimezones = useMemo(() => {
+    try {
+      return Intl.supportedValuesOf('timeZone');
+    } catch {
+      return [timezone];
+    }
+  }, [timezone]);
+
+  const local = useMemo(() => {
+    if (!data || !selected) return null;
+    try {
+      return computeLocalResult(data, selected);
+    } catch {
+      return null;
+    }
+  }, [data, selected]);
+  const liveCircumstances = useMemo(() => {
+    if (!local?.localEclipse || !timeMs) return null;
+    try {
+      const circumstances = local.localEclipse.getCircumstances(
+        TimeOfInterest.fromDate(new Date(timeMs)),
+      );
+      const horizontal = circumstances.getApparentTopocentricHorizontalCoordinates();
+      return {
+        magnitude: Math.max(0, circumstances.getMagnitude()),
+        obscuration: Math.max(0, circumstances.getObscuration()),
+        altitude: horizontal.altitude,
+        azimuth: horizontal.azimuth,
+      };
+    } catch {
+      return null;
+    }
+  }, [local, timeMs]);
+
+  const displayZone =
+    timeMode === 'local' && selected ? timezoneOverride || timezone : 'UTC';
+  const timelineBounds = useMemo(() => {
+    if (!data) return { start: 0, end: 1 };
+    const eclipseContacts = local?.contacts.filter((contact) => contact.key.startsWith('c'));
+    const start = eclipseContacts?.[0]?.date.getTime() ?? data.rangeStart.getTime();
+    const end = eclipseContacts?.[eclipseContacts.length - 1]?.date.getTime() ?? data.rangeEnd.getTime();
+    return { start, end: Math.max(start + 1, end) };
+  }, [data, local]);
+  const timelineProgress = Math.max(
+    0,
+    Math.min(1, (timeMs - timelineBounds.start) / (timelineBounds.end - timelineBounds.start)),
+  );
+
+  const showToast = useCallback((message: string) => {
+    setToast(message);
+    window.setTimeout(() => setToast(''), 2400);
+  }, []);
+
+  const choosePoint = useCallback(
+    (
+      lat: number,
+      lon: number,
+      name = 'Selected point',
+      accuracy?: number,
+      elevation?: number,
+    ) => {
+      const provisional: SelectedLocation = {
+        lat: Math.max(-90, Math.min(90, lat)),
+        lon: ((((lon + 180) % 360) + 360) % 360) - 180,
+        elevation: elevation ?? 0,
+        name,
+        accuracy,
+      };
+      setSelected(provisional);
+      setTimezoneOverride('');
+      setProfile(null);
+      setSheetSnap('mid');
+      mapRef.current?.easeTo({
+        center: [provisional.lon, provisional.lat],
+        zoom: Math.max(mapRef.current.getZoom(), 6),
+        duration: 650,
+      });
+
+      Promise.allSettled([
+        name === 'Selected point' || name === 'Shared location'
+          ? reverseGeocode(provisional.lat, provisional.lon)
+          : Promise.resolve(name),
+        elevation === undefined
+          ? fetchElevation(provisional.lat, provisional.lon)
+          : Promise.resolve(elevation),
+      ]).then(([resolvedName, resolvedElevation]) => {
+        setSelected((current) => {
+          if (!current || current.lat !== provisional.lat || current.lon !== provisional.lon) return current;
+          return {
+            ...current,
+            name: resolvedName.status === 'fulfilled' ? resolvedName.value : current.name,
+            elevation:
+              resolvedElevation.status === 'fulfilled' ? Math.round(resolvedElevation.value) : current.elevation,
+          };
+        });
+      });
+    },
+    [],
+  );
+  useEffect(() => {
+    choosePointRef.current = choosePoint;
+  }, [choosePoint]);
+
+  useEffect(() => {
+    urlStateRef.current = getInitialUrlState();
+    const initial = urlStateRef.current;
+    if (!initial) return;
+    if (/^-?\d+-\d{2}-\d{2}$/.test(initial.event)) setEventDate(initial.event);
+    setBaseMap(BASE_LABELS.some((item) => item.id === initial.base) ? initial.base : 'street');
+    setLayers(initial.layers);
+    setNightOpacity(initial.nightOpacity);
+    setTimezoneOverride(initial.timezoneOverride);
+    setMapCenter({ lat: initial.center[1], lon: initial.center[0], zoom: initial.zoom });
+    if (initial.selected) {
+      choosePoint(
+        initial.selected.lat,
+        initial.selected.lon,
+        initial.selected.name,
+        undefined,
+        initial.hasElevation ? initial.selected.elevation : undefined,
+      );
+      setTimezoneOverride(initial.timezoneOverride);
+    }
+    if (initial.time) setTimeMs(initial.time);
+    try {
+      const stored = JSON.parse(localStorage.getItem('umbra-saved-places') || '[]') as SelectedLocation[];
+      setSavedPlaces(Array.isArray(stored) ? stored.slice(0, 12) : []);
+    } catch {
+      setSavedPlaces([]);
+    }
+  }, [choosePoint]);
+
+  useEffect(() => {
+    if (!mapContainerRef.current || mapRef.current) return;
+    let disposed = false;
+    import('maplibre-gl').then((maplibregl) => {
+      if (disposed || !mapContainerRef.current) return;
+      const initial = urlStateRef.current ?? getInitialUrlState();
+      const map = new maplibregl.Map({
+        container: mapContainerRef.current,
+        style: BASE_STYLE,
+        center: initial?.center ?? [0, 15],
+        zoom: initial?.zoom ?? 2,
+        minZoom: 1.2,
+        maxZoom: 18,
+        attributionControl: { compact: true },
+        dragRotate: false,
+        pitchWithRotate: false,
+      });
+      mapRef.current = map;
+      map.touchZoomRotate.disableRotation();
+      map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
+      map.addControl(new maplibregl.ScaleControl({ maxWidth: 110, unit: 'metric' }), 'bottom-right');
+      map.addControl(new maplibregl.FullscreenControl(), 'bottom-right');
+      map.on('load', () => {
+        installEclipseLayers(map);
+        const showContour = (kind: 'Magnitude' | 'Maximum time') =>
+          (event: import('maplibre-gl').MapLayerMouseEvent) => {
+            const label = event.features?.[0]?.properties?.label;
+            if (!label) return;
+            map.getCanvas().style.cursor = 'help';
+            setContourReadout({ label: String(label), kind, x: event.point.x, y: event.point.y });
+          };
+        map.on('mousemove', 'magnitude-contour-lines', showContour('Magnitude'));
+        map.on('mousemove', 'maximum-time-contour-lines', showContour('Maximum time'));
+        map.on('mouseleave', 'magnitude-contour-lines', () => {
+          map.getCanvas().style.cursor = 'crosshair';
+          setContourReadout(null);
+        });
+        map.on('mouseleave', 'maximum-time-contour-lines', () => {
+          map.getCanvas().style.cursor = 'crosshair';
+          setContourReadout(null);
+        });
+        setMapReady(true);
+      });
+      map.on('click', (event) => {
+        choosePointRef.current(event.lngLat.lat, event.lngLat.lng);
+      });
+      map.on('contextmenu', (event) => {
+        map.easeTo({
+          center: event.lngLat,
+          zoom: Math.min(12, map.getZoom() + 2),
+          duration: 450,
+        });
+      });
+      map.on('mousemove', (event) => {
+        const now = performance.now();
+        if (now - lastCursorUpdateRef.current < 80) return;
+        lastCursorUpdateRef.current = now;
+        setCursor({ lat: event.lngLat.lat, lon: event.lngLat.lng });
+      });
+      map.on('mouseout', () => setCursor(null));
+      map.on('moveend', () => {
+        const center = map.getCenter();
+        setMapCenter({ lat: center.lat, lon: center.lng, zoom: map.getZoom() });
+      });
+    });
+    return () => {
+      disposed = true;
+      if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current);
+      mapRef.current?.remove();
+      mapRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    loadEclipse(eventDate)
+      .then((loaded) => {
+        if (!active) return;
+        setData(loaded);
+        setTimeMs((current) =>
+          current && current >= loaded.rangeStart.getTime() && current <= loaded.rangeEnd.getTime()
+            ? current
+            : loaded.greatestTime.getTime(),
+        );
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setLoadError(error instanceof Error ? error.message : 'This eclipse could not be loaded.');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [eventDate]);
+
+  useEffect(() => {
+    if (!mapReady || !data || !mapRef.current) return;
+    updateEclipseGeometry(mapRef.current, data);
+    if (!initialMapViewHandledRef.current) {
+      initialMapViewHandledRef.current = true;
+      if (!urlStateRef.current?.hasMapView) {
+        fitEclipse(mapRef.current, data, window.innerWidth > 760 ? 410 : 0);
+      }
+    } else {
+      fitEclipse(mapRef.current, data, window.innerWidth > 760 ? 410 : 0);
+    }
+  }, [mapReady, data]);
+
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    updateVisibility(mapRef.current, layers);
+    updateBaseMap(mapRef.current, baseMap, layers.lightPollution, nightOpacity);
+  }, [mapReady, layers, baseMap, nightOpacity]);
+
+  useEffect(() => {
+    if (
+      !mapReady ||
+      !mapRef.current ||
+      !data ||
+      (!layers.magnitude && !layers.timeContours) ||
+      contourDateRef.current === data.date
+    ) {
+      return;
+    }
+    const map = mapRef.current;
+    let cancelled = false;
+    const timeout = window.setTimeout(() => {
+      updateScientificContours(
+        map,
+        data,
+        () => !cancelled && mapRef.current === map,
+      ).then((applied) => {
+        if (applied && !cancelled) contourDateRef.current = data.date;
+      });
+    }, 80);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [mapReady, data, layers.magnitude, layers.timeContours]);
+
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    updateSelectedLocation(mapRef.current, selected);
+  }, [mapReady, selected]);
+
+  useEffect(() => {
+    if (!mapReady || !mapRef.current || !data || !timeMs) return;
+    const map = mapRef.current;
+    const timeout = window.setTimeout(() => {
+      const date = new Date(timeMs);
+      updateNightZones(map, date);
+      updateShadow(map, layers.shadow ? shadowOutlineAt(data, date) : null);
+    }, 70);
+    return () => window.clearTimeout(timeout);
+  }, [mapReady, data, timeMs, layers.shadow]);
+
+  const localMaximumMs = local?.maximum?.date.getTime() ?? null;
+
+  useEffect(() => {
+    if (!localMaximumMs) return;
+    const timeout = window.setTimeout(() => setTimeMs(localMaximumMs), 0);
+    return () => window.clearTimeout(timeout);
+  }, [localMaximumMs]);
+
+  useEffect(() => {
+    if (!playing || !data) return;
+    let frame = 0;
+    let previous = performance.now();
+    const tick = (now: number) => {
+      const elapsed = now - previous;
+      previous = now;
+      const speed = (timelineBounds.end - timelineBounds.start) / 22_000;
+      setTimeMs((current) => {
+        const next = Math.max(timelineBounds.start, current) + elapsed * speed;
+        if (next >= timelineBounds.end) {
+          setPlaying(false);
+          return timelineBounds.end;
+        }
+        return next;
+      });
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [playing, data, timelineBounds]);
+
+  useEffect(() => {
+    let active = true;
+    if (!mapReady || !mapRef.current) return;
+    if (!comparisonDates.length) {
+      updateComparisons(mapRef.current, []);
+      return;
+    }
+    Promise.all(comparisonDates.filter((date) => date !== eventDate).map(loadEclipse)).then((items) => {
+      if (active && mapRef.current) updateComparisons(mapRef.current, items);
+    });
+    return () => {
+      active = false;
+    };
+  }, [mapReady, comparisonDates, eventDate]);
+
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    updateProfileLine(mapRef.current, profile?.samples ?? []);
+  }, [mapReady, profile]);
+
+  const togglePlayback = useCallback(() => {
+    setTimeMs((current) => (current >= timelineBounds.end ? timelineBounds.start : current));
+    setPlaying((value) => !value);
+  }, [timelineBounds]);
+
+  const startLocationTracking = useCallback(() => {
+    if (!('geolocation' in navigator)) {
+      showToast('Location is not available in this browser');
+      return;
+    }
+    if (watchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
+      setTracking(false);
+      showToast('Location tracking stopped');
+      return;
+    }
+    setTimezoneOverride('');
+    setTracking(true);
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      (position) => {
+        const { latitude, longitude, accuracy, altitude } = position.coords;
+        setSelected((current) => ({
+          lat: latitude,
+          lon: longitude,
+          accuracy,
+          elevation: altitude ?? current?.elevation ?? 0,
+          name: 'My location',
+        }));
+        mapRef.current?.easeTo({
+          center: [longitude, latitude],
+          zoom: Math.max(8, mapRef.current.getZoom()),
+          duration: 550,
+        });
+        setSheetSnap('mid');
+      },
+      () => {
+        setTracking(false);
+        if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current);
+        watchIdRef.current = null;
+        showToast('Allow location access to use this tool');
+      },
+      { enableHighAccuracy: true, maximumAge: 10_000, timeout: 15_000 },
+    );
+  }, [showToast]);
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const typing = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
+      if (event.key === 'Escape') {
+        setDrawer(null);
+        return;
+      }
+      if (typing) return;
+      if (event.key === '/' || ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k')) {
+        event.preventDefault();
+        setDrawer('search');
+      } else if (event.key.toLowerCase() === 'c') {
+        setDrawer('catalog');
+      } else if (event.key.toLowerCase() === 'l') {
+        startLocationTracking();
+      } else if (event.code === 'Space') {
+        event.preventDefault();
+        togglePlayback();
+      } else if (event.key === 'ArrowLeft') {
+        setTimeMs((value) => Math.max(timelineBounds.start, value - 60_000));
+      } else if (event.key === 'ArrowRight') {
+        setTimeMs((value) => Math.min(timelineBounds.end, value + 60_000));
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [startLocationTracking, togglePlayback, timelineBounds]);
+
+  useEffect(() => {
+    if (!data) return;
+    const params = new URLSearchParams();
+    params.set('e', eventDate);
+    if (selected) {
+      params.set('lat', selected.lat.toFixed(6));
+      params.set('lon', selected.lon.toFixed(6));
+      if (selected.elevation) params.set('elv', selected.elevation.toFixed(0));
+      if (timezoneOverride) params.set('tz', timezoneOverride);
+    }
+    params.set('mapLat', mapCenter.lat.toFixed(5));
+    params.set('mapLon', mapCenter.lon.toFixed(5));
+    params.set('z', mapCenter.zoom.toFixed(2));
+    if (baseMap !== 'street') params.set('style', baseMap);
+    const activeLayers = (Object.keys(layers) as Array<keyof LayerVisibility>).filter(
+      (key) => layers[key],
+    );
+    params.set('layers', activeLayers.join(','));
+    if (Math.abs(nightOpacity - 0.62) > 0.01) {
+      params.set('nightOpacity', nightOpacity.toFixed(2));
+    }
+    if (Math.abs(timeMs - data.greatestTime.getTime()) > 60_000) {
+      params.set('t', new Date(timeMs).toISOString());
+    }
+    window.history.replaceState(null, '', window.location.pathname + '?' + params.toString());
+  }, [
+    data,
+    eventDate,
+    selected,
+    timezoneOverride,
+    baseMap,
+    mapCenter,
+    layers,
+    nightOpacity,
+    timeMs,
+  ]);
+
+  const changeEvent = useCallback(async (date: string) => {
+    setLoading(true);
+    setLoadError('');
+    setPlaying(false);
+    setDrawer(null);
+    setEventDate(date);
+    setSheetSnap('peek');
+  }, []);
+
+  const stepEvent = useCallback(
+    async (direction: -1 | 1) => {
+      try {
+        const next = await getAdjacentEclipseDate(eventDate, direction);
+        if (next) changeEvent(next);
+        else showToast('End of the eclipse catalog');
+      } catch {
+        showToast('Could not load the adjacent eclipse');
+      }
+    },
+    [eventDate, changeEvent, showToast],
+  );
+
+  const openCatalog = useCallback(() => {
+    setDrawer('catalog');
+    if (!catalogSearched) {
+      window.setTimeout(() => {
+        document.querySelector<HTMLButtonElement>('[data-catalog-search]')?.click();
+      }, 30);
+    }
+  }, [catalogSearched]);
+
+  const runCatalogSearch = useCallback(async () => {
+    setCatalogError('');
+    if (fromYear < -1999 || toYear > 3000 || fromYear > toYear) {
+      setCatalogError('Use a valid range from 1999 BCE to 3000 CE.');
+      return;
+    }
+    if (visibleHere && !selected) {
+      setCatalogError('Choose a location first.');
+      return;
+    }
+    if (visibleHere && toYear - fromYear > 300) {
+      setCatalogError('Location searches are limited to 300 years at a time.');
+      return;
+    }
+    setCatalogLoading(true);
+    setCatalogProgress(0);
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    try {
+      const entries = await searchCatalogue(
+        fromYear,
+        toYear,
+        setCatalogProgress,
+        visibleHere && selected ? { location: selected, centralOnly } : undefined,
+      );
+      const saros = sarosFilter.trim() ? Number(sarosFilter) : null;
+      const filtered = entries.filter(
+        (entry) =>
+          typeFilters.includes(entry.type) &&
+          entry.durationSeconds >= minDuration * 60 &&
+          (saros === null || entry.saros === saros),
+      );
+      filtered.sort((a, b) => {
+        if (catalogSort === 'duration') return b.durationSeconds - a.durationSeconds;
+        if (catalogSort === 'magnitude') return b.magnitude - a.magnitude;
+        return compareEclipseDates(a.date, b.date);
+      });
+      setCatalogResults(filtered);
+      setCatalogSearched(true);
+    } catch (error) {
+      setCatalogError(error instanceof Error ? error.message : 'The catalog could not be searched.');
+    } finally {
+      setCatalogLoading(false);
+      setCatalogProgress(1);
+    }
+  }, [
+    fromYear,
+    toYear,
+    visibleHere,
+    selected,
+    centralOnly,
+    sarosFilter,
+    typeFilters,
+    minDuration,
+    catalogSort,
+  ]);
+
+  const submitPlaceSearch = useCallback(
+    async (event: FormEvent) => {
+      event.preventDefault();
+      if (!placeQuery.trim()) return;
+      const coordinateMatch = placeQuery
+        .trim()
+        .match(/^(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)$/);
+      if (coordinateMatch) {
+        const lat = Number(coordinateMatch[1]);
+        const lon = Number(coordinateMatch[2]);
+        if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+          choosePoint(lat, lon);
+          setDrawer(null);
+          return;
+        }
+      }
+      setPlaceLoading(true);
+      setPlaceError('');
+      try {
+        const results = await searchPlaces(placeQuery.trim());
+        setPlaceResults(results);
+        if (!results.length) setPlaceError('No places found. Try a region or country.');
+      } catch {
+        setPlaceError('Place search is temporarily unavailable.');
+      } finally {
+        setPlaceLoading(false);
+      }
+    },
+    [placeQuery, choosePoint],
+  );
+
+  const choosePlace = useCallback(
+    (place: PlaceResult | SelectedLocation) => {
+      choosePoint(place.lat, place.lon, place.name, 'accuracy' in place ? place.accuracy : undefined);
+      setDrawer(null);
+    },
+    [choosePoint],
+  );
+
+  const saveCurrentPlace = useCallback(() => {
+    if (!selected) return;
+    const exists = savedPlaces.some(
+      (place) => Math.abs(place.lat - selected.lat) < 0.00001 && Math.abs(place.lon - selected.lon) < 0.00001,
+    );
+    const next = exists
+      ? savedPlaces.filter(
+          (place) => Math.abs(place.lat - selected.lat) >= 0.00001 || Math.abs(place.lon - selected.lon) >= 0.00001,
+        )
+      : [selected, ...savedPlaces].slice(0, 12);
+    setSavedPlaces(next);
+    localStorage.setItem('umbra-saved-places', JSON.stringify(next));
+    showToast(exists ? 'Place removed' : 'Place saved on this device');
+  }, [selected, savedPlaces, showToast]);
+
+  const copyText = useCallback(
+    async (value: string, message = 'Copied') => {
+      try {
+        await navigator.clipboard.writeText(value);
+        showToast(message);
+      } catch {
+        showToast('Copy failed');
+      }
+    },
+    [showToast],
+  );
+
+  const shareView = useCallback(async () => {
+    const payload = {
+      title: data ? formatDateLabel(data.date) + ' solar eclipse' : 'Umbra eclipse map',
+      text: selected ? 'Eclipse circumstances for ' + selected.name : 'Explore this solar eclipse',
+      url: window.location.href,
+    };
+    try {
+      if (navigator.share) await navigator.share(payload);
+      else await copyText(window.location.href, 'Link copied');
+    } catch {
+      // Sharing was cancelled.
+    }
+  }, [data, selected, copyText]);
+
+  const exportData = useCallback(
+    async (kind: 'geojson' | 'kml' | 'kmz' | 'gpx' | 'csv' | 'ics') => {
+      if (!data) return;
+      const baseName = 'solar-eclipse-' + data.date;
+      const coordinates = (points: Array<{ lat: number; lon: number }>) =>
+        points.map((point) => point.lon.toFixed(6) + ',' + point.lat.toFixed(6)).join(' ');
+      const polygonCoordinates = (points: Array<{ lat: number; lon: number }>) => {
+        const ring = points.map((point) => [point.lon, point.lat]);
+        if (
+          ring.length &&
+          (ring[0][0] !== ring[ring.length - 1][0] || ring[0][1] !== ring[ring.length - 1][1])
+        ) {
+          ring.push([...ring[0]]);
+        }
+        return ring;
+      };
+      const buildKml = () => {
+        const centerLineKml = data.geometry.centralLine.length >= 2
+          ? '<Placemark><name>Center line</name><LineString><tessellate>1</tessellate><coordinates>' +
+            coordinates(data.geometry.centralLine) +
+            '</coordinates></LineString></Placemark>'
+          : '';
+        const centralPathKml = data.geometry.umbra.length >= 3
+          ? '<Placemark><name>Central path</name><Polygon><outerBoundaryIs><LinearRing><coordinates>' +
+            coordinates([...data.geometry.umbra, data.geometry.umbra[0]]) +
+            '</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>'
+          : '';
+        const visibilityKml = data.geometry.penumbra.length >= 3
+          ? '<Placemark><name>Partial visibility</name><Polygon><outerBoundaryIs><LinearRing><coordinates>' +
+            coordinates([...data.geometry.penumbra, data.geometry.penumbra[0]]) +
+            '</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>'
+          : '';
+        return (
+          '<?xml version="1.0" encoding="UTF-8"?>' +
+          '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>' +
+          '<name>' + xmlEscape(formatDateLabel(data.date) + ' solar eclipse') + '</name>' +
+          centerLineKml +
+          centralPathKml +
+          visibilityKml +
+          '</Document></kml>'
+        );
+      };
+      if (kind === 'geojson') {
+        const features: object[] = [];
+        if (data.geometry.umbra.length >= 3) {
+          features.push({
+            type: 'Feature',
+            properties: { name: 'Central path', eclipse: data.date, type: data.type },
+            geometry: {
+              type: 'Polygon',
+              coordinates: [polygonCoordinates(data.geometry.umbra)],
+            },
+          });
+        }
+        if (data.geometry.centralLine.length >= 2) {
+          features.push({
+            type: 'Feature',
+            properties: { name: 'Center line', eclipse: data.date },
+            geometry: {
+              type: 'LineString',
+              coordinates: data.geometry.centralLine.map((point) => [point.lon, point.lat]),
+            },
+          });
+        }
+        if (data.geometry.penumbra.length >= 3) {
+          features.push({
+            type: 'Feature',
+            properties: { name: 'Partial visibility', eclipse: data.date },
+            geometry: {
+              type: 'Polygon',
+              coordinates: [polygonCoordinates(data.geometry.penumbra)],
+            },
+          });
+        }
+        if (selected) {
+          features.push({
+            type: 'Feature',
+            properties: { name: selected.name, elevation: selected.elevation },
+            geometry: { type: 'Point', coordinates: [selected.lon, selected.lat] },
+          });
+        }
+        downloadText(
+          baseName + '.geojson',
+          'application/geo+json',
+          JSON.stringify({ type: 'FeatureCollection', features }, null, 2),
+        );
+      } else if (kind === 'kml') {
+        downloadText(baseName + '.kml', 'application/vnd.google-earth.kml+xml', buildKml());
+      } else if (kind === 'kmz') {
+        const { default: JSZip } = await import('jszip');
+        const archive = new JSZip();
+        archive.file('doc.kml', buildKml());
+        downloadBlob(
+          baseName + '.kmz',
+          await archive.generateAsync({
+            type: 'blob',
+            compression: 'DEFLATE',
+            mimeType: 'application/vnd.google-earth.kmz',
+          }),
+        );
+      } else if (kind === 'gpx') {
+        const trackPoints = data.geometry.centralLine.length
+          ? data.geometry.centralLine
+          : data.geometry.penumbra;
+        if (trackPoints.length < 2) {
+          showToast('No path geometry is available for this eclipse');
+          return;
+        }
+        const trackName = data.geometry.centralLine.length
+          ? 'Solar eclipse center line'
+          : 'Partial visibility boundary';
+        const track = trackPoints
+          .map((point) => '<trkpt lat="' + point.lat.toFixed(6) + '" lon="' + point.lon.toFixed(6) + '"/>')
+          .join('');
+        const gpx =
+          '<?xml version="1.0" encoding="UTF-8"?>' +
+          '<gpx version="1.1" creator="Umbra" xmlns="http://www.topografix.com/GPX/1/1">' +
+          '<metadata><name>' + xmlEscape(formatDateLabel(data.date) + ' path') + '</name></metadata>' +
+          '<trk><name>' + trackName + '</name><trkseg>' + track + '</trkseg></trk></gpx>';
+        downloadText(baseName + '.gpx', 'application/gpx+xml', gpx);
+      } else if (kind === 'csv') {
+        if (!local || !selected) {
+          showToast('Choose a location to export local contacts');
+          return;
+        }
+        const rows = [
+          ['contact', 'utc_time', 'altitude_deg', 'azimuth_deg', 'magnitude', 'obscuration'],
+          ...local.contacts.map((contact) => [
+            contact.shortLabel,
+            contact.date.toISOString(),
+            contact.altitude.toFixed(3),
+            contact.azimuth.toFixed(3),
+            contact.magnitude.toFixed(6),
+            contact.obscuration.toFixed(6),
+          ]),
+        ];
+        downloadText(
+          baseName + '-' + selected.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() + '.csv',
+          'text/csv',
+          rows.map((row) => row.join(',')).join('\n'),
+        );
+      } else {
+        const first = local?.contacts.find((contact) => contact.key === 'c1')?.date ?? data.rangeStart;
+        const last = local?.contacts.find((contact) => contact.key === 'c4')?.date ?? data.rangeEnd;
+        const description =
+          'Solar eclipse' +
+          (selected ? ' from ' + selected.name : '') +
+          '. Check local weather and use certified eclipse eye protection.';
+        const ics = [
+          'BEGIN:VCALENDAR',
+          'VERSION:2.0',
+          'PRODID:-//Umbra//Solar Eclipse Atlas//EN',
+          'BEGIN:VEVENT',
+          'UID:' + data.date + '@umbra.eclipse',
+          'DTSTAMP:' + icsDate(new Date()),
+          'DTSTART:' + icsDate(first),
+          'DTEND:' + icsDate(last),
+          'SUMMARY:' + TYPE_LABELS[data.type] + ' solar eclipse',
+          'DESCRIPTION:' + description.replaceAll(',', '\\,'),
+          selected ? 'LOCATION:' + selected.name.replaceAll(',', '\\,') : '',
+          'URL:' + window.location.href,
+          'END:VEVENT',
+          'END:VCALENDAR',
+        ]
+          .filter(Boolean)
+          .join('\r\n');
+        downloadText(baseName + '.ics', 'text/calendar', ics);
+      }
+      showToast(kind.toUpperCase() + ' downloaded');
+    },
+    [data, selected, local, showToast],
+  );
+
+  const inspectHorizon = useCallback(async () => {
+    if (!selected || !local?.maximum) {
+      showToast('Choose a visible location first');
+      return;
+    }
+    setProfileLoading(true);
+    try {
+      const result = await fetchHorizonProfile(
+        selected,
+        local.maximum.azimuth,
+        local.maximum.altitude,
+      );
+      setProfile(result);
+      showToast(result.obstructed ? 'Terrain may block the Sun' : 'Sun clears the sampled terrain');
+    } catch {
+      showToast('Terrain profile is temporarily unavailable');
+    } finally {
+      setProfileLoading(false);
+    }
+  }, [selected, local, showToast]);
+
+  const toggleComparison = useCallback(
+    (date: string) => {
+      if (date === eventDate) {
+        showToast('This eclipse is already on the map');
+        return;
+      }
+      setComparisonDates((current) => {
+        if (current.includes(date)) return current.filter((item) => item !== date);
+        if (current.length >= 3) {
+          showToast('Compare up to three eclipses');
+          return current;
+        }
+        return [...current, date];
+      });
+    },
+    [eventDate, showToast],
+  );
+
+  const setLayer = (key: keyof LayerVisibility, value: boolean) => {
+    setLayers((current) => ({ ...current, [key]: value }));
+  };
+
+  const cycleSheet = () => {
+    setSheetSnap((current) => (current === 'peek' ? 'mid' : current === 'mid' ? 'full' : 'peek'));
+  };
+
+  const currentIsSaved =
+    !!selected &&
+    savedPlaces.some(
+      (place) => Math.abs(place.lat - selected.lat) < 0.00001 && Math.abs(place.lon - selected.lon) < 0.00001,
+    );
+
+  const eventColor = data ? colorForType(data.type) : '#D9516E';
+  const eventStyle = { '--event-color': eventColor } as CSSProperties;
+
+  return (
+    <main className={'atlas-app sheet-' + sheetSnap} style={eventStyle}>
+      <div ref={mapContainerRef} className="atlas-map" role="region" aria-label="Interactive solar eclipse map" />
+
+      <header className="topbar">
+        <button
+          className="brand"
+          type="button"
+          onClick={() => data && mapRef.current && fitEclipse(mapRef.current, data, window.innerWidth > 760 ? 410 : 0)}
+          aria-label="Umbra — fit the eclipse path"
+        >
+          <span className="brand-eclipse" aria-hidden="true"><span /></span>
+          <span>Umbra</span>
+        </button>
+        <button className="place-search-trigger" type="button" onClick={() => setDrawer('search')}>
+          <Search size={17} aria-hidden="true" />
+          <span>{selected ? selected.name : 'Find a place'}</span>
+          <kbd>⌘ K</kbd>
+        </button>
+        <div className="topbar-actions">
+          <button className="square-button desktop-only" type="button" onClick={shareView} aria-label="Share this view">
+            <Share2 size={18} aria-hidden="true" />
+          </button>
+          <button
+            className="square-button"
+            type="button"
+            onClick={() => setDrawer(drawer === 'more' ? null : 'more')}
+            aria-label="Open menu"
+            aria-expanded={drawer === 'more'}
+          >
+            <Menu size={19} aria-hidden="true" />
+          </button>
+        </div>
+      </header>
+
+      <aside className="event-panel" aria-label="Eclipse details">
+        <button className="sheet-grabber" type="button" onClick={cycleSheet} aria-label="Resize details panel">
+          <span />
+        </button>
+        <div className="event-panel-scroll">
+          <div className="event-nav">
+            <button type="button" onClick={() => stepEvent(-1)} aria-label="Previous eclipse">
+              <ChevronLeft size={17} aria-hidden="true" />
+            </button>
+            <button className="event-switcher" type="button" onClick={openCatalog}>
+              <CalendarDays size={15} aria-hidden="true" />
+              <span>All solar eclipses</span>
+              <ChevronDown size={15} aria-hidden="true" />
+            </button>
+            <button type="button" onClick={() => stepEvent(1)} aria-label="Next eclipse">
+              <ChevronRight size={17} aria-hidden="true" />
+            </button>
+          </div>
+
+          {loadError ? (
+            <div className="panel-error">
+              <strong>That eclipse could not be opened.</strong>
+              <span>{loadError}</span>
+              <button type="button" onClick={openCatalog}>Browse the catalog</button>
+            </div>
+          ) : (
+            <>
+              <section className="event-intro">
+                <div className="eyebrow-row">
+                  <span className="type-dot" />
+                  <span>{data ? TYPE_LABELS[data.type] + ' solar eclipse' : 'Loading eclipse'}</span>
+                  {data && <span className="relative-date">{relativeDateLabel(data.date)}</span>}
+                </div>
+                <h1>{data ? eventTitle(data.type, data.date) : 'Tracing the Moon’s shadow…'}</h1>
+                <p>{data ? formatDateLabel(data.date) + ' · ' + eventRegion(data.date, data.greatest) : 'Loading calculations and path geometry.'}</p>
+              </section>
+
+              {data && (
+                <div className="event-summary" aria-label="Global eclipse summary">
+                  <div>
+                    <span>Greatest</span>
+                    <strong>{formatTime(data.greatestTime, 'UTC').replace(' UTC', '')}</strong>
+                    <small>UTC</small>
+                  </div>
+                  <div>
+                    <span>Magnitude</span>
+                    <strong>{data.magnitude.toFixed(3)}</strong>
+                    <small>{percent(data.obscuration)} obscured</small>
+                  </div>
+                  <div>
+                    <span>{data.type === 'partial' ? 'Saros series' : data.type === 'annular' ? 'Annularity' : 'Totality'}</span>
+                    <strong>{data.type === 'partial' ? data.saros : formatDuration(data.centralDurationSeconds, true)}</strong>
+                    <small>{data.type === 'partial' ? 'Global partial eclipse' : 'Saros ' + data.saros}</small>
+                  </div>
+                </div>
+              )}
+
+              {!selected ? (
+                <section className="choose-location-card">
+                  <div>
+                    <MapPin size={18} aria-hidden="true" />
+                    <div>
+                      <strong>Will I see it here?</strong>
+                      <span>Tap the map, search, or use your location.</span>
+                    </div>
+                  </div>
+                  <div className="choose-actions">
+                    <button type="button" onClick={() => setDrawer('search')}>Find a place</button>
+                    <button type="button" onClick={startLocationTracking}>
+                      <LocateFixed size={15} aria-hidden="true" /> Locate me
+                    </button>
+                  </div>
+                </section>
+              ) : (
+                <section className="local-section">
+                  <div className="location-heading">
+                    <div>
+                      <span>Your spot</span>
+                      <h2>{selected.name}</h2>
+                      <p>
+                        {formatCoordinate(selected.lat, true)} · {formatCoordinate(selected.lon, false)}
+                        {selected.elevation ? ' · ' + Math.round(selected.elevation) + ' m' : ''}
+                      </p>
+                    </div>
+                    <button
+                      className={currentIsSaved ? 'mini-icon active' : 'mini-icon'}
+                      type="button"
+                      onClick={saveCurrentPlace}
+                      aria-label={currentIsSaved ? 'Remove saved place' : 'Save this place'}
+                    >
+                      <Bookmark size={17} fill={currentIsSaved ? 'currentColor' : 'none'} aria-hidden="true" />
+                    </button>
+                  </div>
+
+                  <div className={'visibility-verdict verdict-' + (local?.type ?? 'none')}>
+                    <span className="verdict-icon">{local?.type === 'none' ? <Moon size={19} /> : <Sun size={19} />}</span>
+                    <div>
+                      <strong>{typeSentence(local?.type ?? 'none')}</strong>
+                      <span>{typeDetail(local?.type ?? 'none')}</span>
+                    </div>
+                  </div>
+
+                  {local && local.type !== 'none' && (
+                    <>
+                      <div className="local-stats">
+                        <div><span>Maximum</span><strong>{local.magnitude.toFixed(3)}</strong></div>
+                        <div><span>Sun covered</span><strong>{percent(local.obscuration)}</strong></div>
+                        <div><span>{local.type === 'partial' ? 'Partial phase' : local.type === 'total' ? 'Totality' : 'Annularity'}</span><strong>{formatDuration(local.type === 'partial' ? local.durationSeconds : local.centralDurationSeconds, true)}</strong></div>
+                        <div>
+                          <span>
+                            {local.type === 'partial'
+                              ? data?.geometry.umbra.length
+                                ? 'Central path edge'
+                                : 'Visibility edge'
+                              : 'Path width'}
+                          </span>
+                          <strong>{local.type === 'partial' ? distanceLabel(local.edgeDistanceKm, distanceUnit) : distanceLabel(local.pathWidthMeters / 1000, distanceUnit)}</strong>
+                        </div>
+                      </div>
+
+                      {liveCircumstances && (
+                        <div className="sun-moon-card">
+                          <div className="eclipse-diagram" aria-hidden="true">
+                            <span className="sun-disc" />
+                            <span
+                              className="moon-disc"
+                              style={
+                                {
+                                  '--moon-size': Math.max(0.72, Math.min(1.25, local.moonSunRatio)),
+                                  '--moon-offset': Math.min(
+                                    42,
+                                    Math.max(
+                                      0,
+                                      1 + local.moonSunRatio - 2 * liveCircumstances.magnitude,
+                                    ) * 27,
+                                  ),
+                                } as CSSProperties
+                              }
+                            />
+                          </div>
+                          <div>
+                            <span>At {formatTime(new Date(timeMs), displayZone).replace(/ [A-Z+].*$/, '')}</span>
+                            <strong>{percent(liveCircumstances.obscuration)} of the Sun covered</strong>
+                            <small>{liveCircumstances.altitude.toFixed(1)}° high · {compassDirection(liveCircumstances.azimuth)} azimuth</small>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="section-title-row">
+                        <div>
+                          <span>Local contacts</span>
+                          <small>{displayZone === 'UTC' ? 'Universal time' : displayZone.replaceAll('_', ' ')}</small>
+                        </div>
+                        <div className="segmented mini">
+                          <button className={timeMode === 'local' ? 'active' : ''} type="button" onClick={() => setTimeMode('local')}>Local</button>
+                          <button className={timeMode === 'utc' ? 'active' : ''} type="button" onClick={() => setTimeMode('utc')}>UTC</button>
+                        </div>
+                      </div>
+                      <div className="contact-list">
+                        {local.contacts.map((contact) => (
+                          <button
+                            type="button"
+                            key={contact.key}
+                            className={Math.abs(contact.date.getTime() - timeMs) < 30_000 ? 'contact-row active' : 'contact-row'}
+                            onClick={() => setTimeMs(contact.date.getTime())}
+                          >
+                            <span className="contact-code">{contact.shortLabel}</span>
+                            <span className="contact-name">{contact.label}</span>
+                            <span className="contact-sky">
+                              <i className={contact.altitude < -0.8 ? 'below' : ''} />
+                              {contact.altitude.toFixed(0)}° {compassDirection(contact.azimuth)}
+                            </span>
+                            <strong>{formatTime(contact.date, displayZone).replace(/ [A-Z+].*$/, '')}</strong>
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="field-tools">
+                        <button type="button" onClick={inspectHorizon} disabled={profileLoading || !local.maximum}>
+                          <Route size={16} aria-hidden="true" />
+                          {profileLoading ? 'Sampling terrain…' : 'Check the horizon'}
+                        </button>
+                        <button type="button" onClick={() => exportData('ics')}>
+                          <CalendarDays size={16} aria-hidden="true" /> Add to calendar
+                        </button>
+                      </div>
+
+                      {profile && <HorizonCard profile={profile} sunAltitude={local.maximum?.altitude ?? 0} />}
+
+                      <details className="precision-details">
+                        <summary>Planning details <ChevronDown size={15} aria-hidden="true" /></summary>
+                        <dl>
+                          {Number.isFinite(local.centerDistanceKm) && (
+                            <div><dt>Center line</dt><dd>{distanceLabel(local.centerDistanceKm, distanceUnit)} {compassDirection(local.centerBearing)}</dd></div>
+                          )}
+                          <div>
+                            <dt>
+                              {local.type === 'partial'
+                                ? data?.geometry.umbra.length
+                                  ? 'Central path edge'
+                                  : 'Visibility edge'
+                                : 'Nearest edge'}
+                            </dt>
+                            <dd>{distanceLabel(local.edgeDistanceKm, distanceUnit)}</dd>
+                          </div>
+                          <div><dt>Moon / Sun</dt><dd>{local.moonSunRatio.toFixed(4)}</dd></div>
+                          <div>
+                            <dt>Elevation</dt>
+                            <dd>
+                              <input
+                                type="number"
+                                min="-500"
+                                max="9000"
+                                step="1"
+                                value={Math.round(selected.elevation)}
+                                onChange={(event) =>
+                                  setSelected((current) =>
+                                    current
+                                      ? { ...current, elevation: Number(event.target.value) || 0 }
+                                      : current,
+                                  )
+                                }
+                                aria-label="Observer elevation in metres"
+                              />
+                              <span>m</span>
+                            </dd>
+                          </div>
+                          <div>
+                            <dt>Time zone</dt>
+                            <dd>
+                              <select
+                                value={timezoneOverride || timezone}
+                                onChange={(event) => setTimezoneOverride(event.target.value)}
+                                aria-label="Observer time zone"
+                              >
+                                {!supportedTimezones.includes(timezone) && <option value={timezone}>{timezone}</option>}
+                                {supportedTimezones.map((zone) => <option key={zone} value={zone}>{zone.replaceAll('_', ' ')}</option>)}
+                              </select>
+                            </dd>
+                          </div>
+                          <div><dt>Coordinates</dt><dd>{toDms(selected.lat, true)}<br />{toDms(selected.lon, false)}</dd></div>
+                        </dl>
+                      </details>
+                    </>
+                  )}
+                </section>
+              )}
+            </>
+          )}
+        </div>
+      </aside>
+
+      <div className="map-tools" aria-label="Map tools">
+        <button
+          className={drawer === 'layers' ? 'square-button active' : 'square-button'}
+          type="button"
+          onClick={() => setDrawer(drawer === 'layers' ? null : 'layers')}
+          aria-label="Map layers"
+        >
+          <Layers3 size={19} aria-hidden="true" />
+        </button>
+        <button
+          className={tracking ? 'square-button active tracking' : 'square-button'}
+          type="button"
+          onClick={startLocationTracking}
+          aria-label={tracking ? 'Stop location tracking' : 'Use my location'}
+        >
+          <LocateFixed size={19} aria-hidden="true" />
+        </button>
+        <button
+          className="square-button"
+          type="button"
+          onClick={() => data && mapRef.current && fitEclipse(mapRef.current, data, window.innerWidth > 760 ? 410 : 0)}
+          aria-label="Fit eclipse path"
+        >
+          <Globe2 size={19} aria-hidden="true" />
+        </button>
+      </div>
+
+      <div className="map-legend" aria-label="Map legend">
+        <span><i className="legend-swatch path" />{data?.type === 'annular' ? 'Annularity' : data?.type === 'partial' ? 'Greatest eclipse' : 'Totality'}</span>
+        <span><i className="legend-swatch center" />Center line</span>
+        <span><i className="legend-swatch partial" />Partial visibility</span>
+      </div>
+
+      {data && (
+        <section className="timeline-dock" aria-label="Eclipse timeline">
+          <button className="play-button" type="button" onClick={togglePlayback} aria-label={playing ? 'Pause animation' : 'Play animation'}>
+            {playing ? <Pause size={15} fill="currentColor" aria-hidden="true" /> : <Play size={15} fill="currentColor" aria-hidden="true" />}
+          </button>
+          <div className="timeline-now">
+            <strong>{formatTime(new Date(timeMs || data.greatestTime), displayZone).replace(/ [A-Z+].*$/, '')}</strong>
+            <span>{displayZone === 'UTC' ? 'UTC' : displayZone.split('/').at(-1)?.replaceAll('_', ' ')}</span>
+          </div>
+          <div className="timeline-range">
+            <input
+              type="range"
+              min={timelineBounds.start}
+              max={timelineBounds.end}
+              value={Math.max(timelineBounds.start, Math.min(timelineBounds.end, timeMs || timelineBounds.start))}
+              onChange={(event) => {
+                setPlaying(false);
+                setTimeMs(Number(event.target.value));
+              }}
+              aria-label="Eclipse time"
+              style={{ '--timeline-progress': timelineProgress } as CSSProperties}
+            />
+            <div className="contact-markers" aria-hidden="true">
+              {local?.contacts
+                .filter((contact) => contact.key.startsWith('c'))
+                .map((contact) => {
+                  const left = ((contact.date.getTime() - timelineBounds.start) / (timelineBounds.end - timelineBounds.start)) * 100;
+                  return <i key={contact.key} style={{ left: Math.max(0, Math.min(100, left)) + '%' }} />;
+                })}
+            </div>
+          </div>
+          <button className="timeline-time-mode" type="button" onClick={() => setTimeMode(timeMode === 'local' ? 'utc' : 'local')}>
+            {timeMode === 'local' && selected ? 'Local' : 'UTC'}
+          </button>
+        </section>
+      )}
+
+      <div className="coordinate-readout">
+        <span>Center {formatCoordinate(mapCenter.lat, true)} · {formatCoordinate(mapCenter.lon, false)}</span>
+        {cursor && <span className="cursor-coordinates">Cursor {formatCoordinate(cursor.lat, true)} · {formatCoordinate(cursor.lon, false)}</span>}
+      </div>
+
+      {contourReadout && (
+        <div
+          className="contour-readout"
+          style={{ left: contourReadout.x + 12, top: contourReadout.y + 12 }}
+        >
+          <span>{contourReadout.kind}</span>
+          <strong>{contourReadout.label}</strong>
+        </div>
+      )}
+
+      {drawer && (
+        <>
+          <button className="drawer-scrim" type="button" onClick={() => setDrawer(null)} aria-label="Close panel" />
+          <aside className={'drawer drawer-' + drawer} aria-label={drawer === 'catalog' ? 'Eclipse catalog' : drawer === 'search' ? 'Place search' : drawer === 'layers' ? 'Map layers' : 'More tools'}>
+            <div className="drawer-header">
+              <div>
+                <span>{drawer === 'catalog' ? 'Five millennia' : drawer === 'search' ? 'Places' : drawer === 'layers' ? 'Map' : 'Umbra'}</span>
+                <h2>{drawer === 'catalog' ? 'Solar eclipse catalog' : drawer === 'search' ? 'Find a place' : drawer === 'layers' ? 'Layers & view' : 'Plan, save & share'}</h2>
+              </div>
+              <button className="mini-icon" type="button" onClick={() => setDrawer(null)} aria-label="Close panel">
+                <X size={18} aria-hidden="true" />
+              </button>
+            </div>
+
+            {drawer === 'search' && (
+              <div className="drawer-content">
+                <form className="place-search-form" onSubmit={submitPlaceSearch}>
+                  <Search size={17} aria-hidden="true" />
+                  <input
+                    value={placeQuery}
+                    onChange={(event) => setPlaceQuery(event.target.value)}
+                    placeholder="City, region, coordinates"
+                    autoFocus
+                    aria-label="Place name"
+                  />
+                  {placeLoading && <span className="tiny-spinner" aria-label="Searching" />}
+                </form>
+                {placeError && <p className="inline-error">{placeError}</p>}
+                {!!placeResults.length && (
+                  <div className="place-list">
+                    <span className="list-label">Results</span>
+                    {placeResults.map((place) => (
+                      <button key={place.id} type="button" onClick={() => choosePlace(place)}>
+                        <MapPin size={16} aria-hidden="true" />
+                        <span><strong>{place.name}</strong><small>{place.subtitle}</small></span>
+                        <ChevronRight size={16} aria-hidden="true" />
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {!!savedPlaces.length && (
+                  <div className="place-list saved-list">
+                    <span className="list-label">Saved on this device</span>
+                    {savedPlaces.map((place, index) => (
+                      <button key={place.lat + ':' + place.lon + ':' + index} type="button" onClick={() => choosePlace(place)}>
+                        <Bookmark size={15} fill="currentColor" aria-hidden="true" />
+                        <span><strong>{place.name}</strong><small>{formatCoordinate(place.lat, true)} · {formatCoordinate(place.lon, false)}</small></span>
+                        <ChevronRight size={16} aria-hidden="true" />
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {!placeResults.length && !savedPlaces.length && !placeError && (
+                  <div className="empty-state compact">
+                    <Navigation size={22} aria-hidden="true" />
+                    <strong>Search anywhere on Earth</strong>
+                    <span>Or close this panel and tap the map directly.</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {drawer === 'catalog' && (
+              <div className="drawer-content catalog-content">
+                <div className="year-range">
+                  <label><span>From</span><input type="number" min="-1999" max="3000" value={fromYear} onChange={(event) => setFromYear(Number(event.target.value))} /></label>
+                  <span>to</span>
+                  <label><span>Until</span><input type="number" min="-1999" max="3000" value={toYear} onChange={(event) => setToYear(Number(event.target.value))} /></label>
+                </div>
+                <div className="type-filters" aria-label="Eclipse types">
+                  {ALL_TYPES.map((type) => (
+                    <button
+                      type="button"
+                      key={type}
+                      className={typeFilters.includes(type) ? 'active' : ''}
+                      onClick={() =>
+                        setTypeFilters((current) =>
+                          current.includes(type) ? current.filter((item) => item !== type) : [...current, type],
+                        )
+                      }
+                    >
+                      <i style={{ background: colorForType(type) }} />
+                      {TYPE_LABELS[type]}
+                    </button>
+                  ))}
+                </div>
+                <label className="check-row">
+                  <input type="checkbox" checked={visibleHere} onChange={(event) => setVisibleHere(event.target.checked)} disabled={!selected} />
+                  <span><strong>Visible from my spot</strong><small>{selected ? selected.name : 'Choose a location first'}</small></span>
+                </label>
+                {visibleHere && (
+                  <label className="check-row nested">
+                    <input type="checkbox" checked={centralOnly} onChange={(event) => setCentralOnly(event.target.checked)} />
+                    <span><strong>Central eclipse only</strong><small>Total or annular at this spot</small></span>
+                  </label>
+                )}
+                <details className="filter-details">
+                  <summary><ListFilter size={15} aria-hidden="true" /> More filters <ChevronDown size={15} aria-hidden="true" /></summary>
+                  <div className="filter-grid">
+                    <label><span>Minimum central phase</span><select value={minDuration} onChange={(event) => setMinDuration(Number(event.target.value))}><option value="0">Any duration</option><option value="1">1 minute</option><option value="3">3 minutes</option><option value="5">5 minutes</option><option value="7">7 minutes</option></select></label>
+                    <label><span>Saros series</span><input type="number" value={sarosFilter} onChange={(event) => setSarosFilter(event.target.value)} placeholder="Any" /></label>
+                    <label><span>Sort by</span><select value={catalogSort} onChange={(event) => setCatalogSort(event.target.value as typeof catalogSort)}><option value="date">Date</option><option value="duration">Longest</option><option value="magnitude">Magnitude</option></select></label>
+                  </div>
+                </details>
+                <button className="catalog-search-button" type="button" onClick={runCatalogSearch} disabled={catalogLoading} data-catalog-search>
+                  {catalogLoading ? 'Searching ' + Math.round(catalogProgress * 100) + '%' : 'Search eclipses'}
+                </button>
+                {catalogError && <p className="inline-error">{catalogError}</p>}
+                {catalogSearched && (
+                  <div className="catalog-results">
+                    <div className="results-heading">
+                      <span>{catalogResults.length.toLocaleString()} eclipses</span>
+                      {comparisonDates.length > 0 && <small>{comparisonDates.length}/3 compared</small>}
+                    </div>
+                    {catalogResults.slice(0, 300).map((entry) => (
+                      <article className={entry.date === eventDate ? 'catalog-card current' : 'catalog-card'} key={entry.date}>
+                        <button className="catalog-open" type="button" onClick={() => changeEvent(entry.date)}>
+                          <i style={{ background: colorForType(entry.type) }} />
+                          <span>
+                            <strong>{formatDateLabel(entry.date)}</strong>
+                            <small>{TYPE_LABELS[entry.type]} · Saros {entry.saros}</small>
+                          </span>
+                          <span className="catalog-metric">
+                            {entry.type === 'partial' ? entry.magnitude.toFixed(3) : formatDuration(entry.durationSeconds, true)}
+                          </span>
+                        </button>
+                        <button
+                          className={comparisonDates.includes(entry.date) ? 'compare-button active' : 'compare-button'}
+                          type="button"
+                          onClick={() => toggleComparison(entry.date)}
+                          aria-pressed={comparisonDates.includes(entry.date)}
+                        >
+                          {comparisonDates.includes(entry.date) ? <Check size={13} /> : <span />}
+                          Compare
+                        </button>
+                      </article>
+                    ))}
+                    {catalogResults.length > 300 && <p className="result-limit">Showing the first 300. Narrow the range to see more.</p>}
+                    {!catalogResults.length && <div className="empty-state compact"><Moon size={22} /><strong>No matching eclipses</strong><span>Widen the years or remove a filter.</span></div>}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {drawer === 'layers' && (
+              <div className="drawer-content">
+                <section className="settings-section">
+                  <span className="list-label">Base map</span>
+                  <div className="base-map-grid">
+                    {BASE_LABELS.map((item) => (
+                      <button className={baseMap === item.id ? 'active' : ''} type="button" key={item.id} onClick={() => setBaseMap(item.id)}>
+                        <span className={'base-preview preview-' + item.id} />
+                        <strong>{item.label}</strong>
+                        <small>{item.detail}</small>
+                        {baseMap === item.id && <Check size={15} aria-hidden="true" />}
+                      </button>
+                    ))}
+                  </div>
+                </section>
+                <section className="settings-section">
+                  <span className="list-label">Eclipse geometry</span>
+                  <ToggleRow label="Central path & limits" detail="Total, annular, or hybrid band" color={eventColor} checked={layers.path} onChange={(value) => setLayer('path', value)} />
+                  <ToggleRow label="Center line" detail="Maximum duration along the path" color="#2F68D8" checked={layers.center} onChange={(value) => setLayer('center', value)} />
+                  <ToggleRow label="Partial visibility" detail="Penumbra footprint" color="#237A57" checked={layers.partial} onChange={(value) => setLayer('partial', value)} />
+                  <ToggleRow label="Sunrise & sunset limits" detail="Low-horizon boundaries" color="#B67A12" checked={layers.horizons} onChange={(value) => setLayer('horizons', value)} />
+                  <ToggleRow label="10-minute path ticks" detail="Timing guides across the center line" color="#6E56CF" checked={layers.guides} onChange={(value) => setLayer('guides', value)} />
+                  <ToggleRow label="Magnitude contours" detail="Approximate planning lines in 0.2 steps" color="#237A57" checked={layers.magnitude} onChange={(value) => setLayer('magnitude', value)} />
+                  <ToggleRow label="Maximum-time contours" detail="Approximate local maximum every 30 min" color="#6E56CF" checked={layers.timeContours} onChange={(value) => setLayer('timeContours', value)} />
+                  <ToggleRow label="Live umbral shadow" detail="Follows the timeline" color="#18211D" checked={layers.shadow} onChange={(value) => setLayer('shadow', value)} />
+                </section>
+                {(layers.magnitude || layers.timeContours) && (
+                  <p className="contour-note">
+                    Hover a contour to read its value. These 2° planning contours are approximate; use point calculations for exact local circumstances.
+                  </p>
+                )}
+                <section className="settings-section">
+                  <span className="list-label">Planning overlays</span>
+                  <ToggleRow label="Day, twilight & night" detail="Civil, nautical, astronomical" color="#6E56CF" checked={layers.night} onChange={(value) => setLayer('night', value)} />
+                  <ToggleRow label="Night lights" detail="NASA Earth at Night" color="#F1B94B" checked={layers.lightPollution} onChange={(value) => setLayer('lightPollution', value)} />
+                  {layers.lightPollution && (
+                    <label className="opacity-row"><span>Overlay strength</span><input type="range" min="0.15" max="0.95" step="0.05" value={nightOpacity} onChange={(event) => setNightOpacity(Number(event.target.value))} /></label>
+                  )}
+                </section>
+                <p className="map-hint">Tap for local circumstances · right-click to center and zoom · Shift-drag for box zoom.</p>
+              </div>
+            )}
+
+            {drawer === 'more' && (
+              <div className="drawer-content">
+                <section className="action-section">
+                  <span className="list-label">This view</span>
+                  <div className="action-grid">
+                    <button type="button" onClick={shareView}><Share2 size={17} /><span>Share link</span></button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        copyText(
+                          '<iframe title="Umbra eclipse map" src="' +
+                            window.location.href +
+                            '" width="100%" height="600" loading="lazy"></iframe>',
+                          'Embed code copied',
+                        )
+                      }
+                    >
+                      <Clipboard size={17} /><span>Copy embed</span>
+                    </button>
+                    <button type="button" onClick={() => window.print()}><Printer size={17} /><span>Field card</span></button>
+                    <button type="button" onClick={() => exportData('ics')}><CalendarDays size={17} /><span>Calendar</span></button>
+                  </div>
+                </section>
+                <section className="action-section">
+                  <span className="list-label">Download path data</span>
+                  <div className="download-list">
+                    <button type="button" onClick={() => exportData('geojson')}><FileDown size={16} /><span><strong>GeoJSON</strong><small>Map software & code</small></span></button>
+                    <button type="button" onClick={() => exportData('kml')}><Globe2 size={16} /><span><strong>KML</strong><small>Google Earth</small></span></button>
+                    <button type="button" onClick={() => exportData('kmz')}><Globe2 size={16} /><span><strong>KMZ</strong><small>Compressed Google Earth</small></span></button>
+                    <button type="button" onClick={() => exportData('gpx')}><Route size={16} /><span><strong>GPX</strong><small>GPS route</small></span></button>
+                    <button type="button" onClick={() => exportData('csv')}><Download size={16} /><span><strong>Local CSV</strong><small>Contacts & sky angles</small></span></button>
+                  </div>
+                </section>
+                {selected && (
+                  <section className="action-section">
+                    <span className="list-label">Open this spot</span>
+                    <div className="link-list">
+                      <a href={'https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=' + selected.lat + ',' + selected.lon} target="_blank" rel="noreferrer">Street View <ExternalLink size={14} /></a>
+                      <a href={'https://www.google.com/maps/@?api=1&map_action=map&center=' + selected.lat + ',' + selected.lon + '&zoom=9&basemap=roadmap&layer=traffic'} target="_blank" rel="noreferrer">Google traffic <ExternalLink size={14} /></a>
+                      <a href={'https://www.peakfinder.com/?lat=' + selected.lat + '&lng=' + selected.lon} target="_blank" rel="noreferrer">PeakFinder <ExternalLink size={14} /></a>
+                    </div>
+                  </section>
+                )}
+                <section className="action-section settings-inline">
+                  <span className="list-label">Preferences</span>
+                  <div className="preference-row"><span>Distance</span><div className="segmented"><button type="button" className={distanceUnit === 'metric' ? 'active' : ''} onClick={() => setDistanceUnit('metric')}>km</button><button type="button" className={distanceUnit === 'imperial' ? 'active' : ''} onClick={() => setDistanceUnit('imperial')}>mi</button></div></div>
+                  <div className="preference-row"><span>Clock</span><div className="segmented"><button type="button" className={timeMode === 'local' ? 'active' : ''} onClick={() => setTimeMode('local')}>Local</button><button type="button" className={timeMode === 'utc' ? 'active' : ''} onClick={() => setTimeMode('utc')}>UTC</button></div></div>
+                </section>
+                <details className="about-details">
+                  <summary><Info size={16} /> About the calculations <ChevronDown size={15} /></summary>
+                  <div>
+                    <p>Predictions use Besselian elements from the Five Millennium Canon of Solar Eclipses. Times are calculated for your coordinates and elevation.</p>
+                    <p>Small differences are expected from atmospheric refraction, terrain, ΔT, and the Moon’s irregular limb. Always verify critical plans with an official source.</p>
+                    <p className="safety-note"><Sun size={16} /> Use certified eclipse glasses whenever any bright part of the Sun is visible. Ordinary sunglasses are not safe.</p>
+                    <div className="source-links">
+                      <a href="https://eclipse.gsfc.nasa.gov/SEcat5/SEcatalog.html" target="_blank" rel="noreferrer">NASA eclipse catalog <ExternalLink size={13} /></a>
+                      <a href="https://github.com/andrmoel/astronomy-bundle-js" target="_blank" rel="noreferrer">Calculation library <ExternalLink size={13} /></a>
+                      <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">Map attributions <ExternalLink size={13} /></a>
+                    </div>
+                  </div>
+                </details>
+                <p className="credits">Eclipse predictions by Fred Espenak and Jean Meeus (NASA’s GSFC). Built as an independent clean-room explorer.</p>
+              </div>
+            )}
+          </aside>
+        </>
+      )}
+
+      {loading && (
+        <div className="loading-pill" role="status">
+          <span className="tiny-spinner" />
+          Calculating eclipse path
+        </div>
+      )}
+      <div className={toast ? 'toast visible' : 'toast'} role="status" aria-live="polite">{toast}</div>
+    </main>
+  );
+}
+
+function ToggleRow({
+  label,
+  detail,
+  color,
+  checked,
+  onChange,
+}: {
+  label: string;
+  detail: string;
+  color: string;
+  checked: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <label className="toggle-row">
+      <i style={{ background: color }} />
+      <span><strong>{label}</strong><small>{detail}</small></span>
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+      <b aria-hidden="true"><span /></b>
+    </label>
+  );
+}
+
+function HorizonCard({
+  profile,
+  sunAltitude,
+}: {
+  profile: HorizonProfile;
+  sunAltitude: number;
+}) {
+  const min = Math.min(-1, ...profile.samples.map((sample) => sample.apparentAngle));
+  const max = Math.max(sunAltitude + 1, ...profile.samples.map((sample) => sample.apparentAngle));
+  const height = 70;
+  const width = 300;
+  const y = (value: number) => height - ((value - min) / Math.max(0.1, max - min)) * height;
+  const points = profile.samples
+    .map((sample, index) => ((index / (profile.samples.length - 1)) * width).toFixed(1) + ',' + y(sample.apparentAngle).toFixed(1))
+    .join(' ');
+  return (
+    <div className={profile.obstructed ? 'horizon-card obstructed' : 'horizon-card clear'}>
+      <div>
+        <span>Horizon toward maximum</span>
+        <strong>{profile.obstructed ? 'Terrain may block the Sun' : 'Clear in this terrain sample'}</strong>
+      </div>
+      <svg viewBox={'0 0 ' + width + ' ' + height} role="img" aria-label="Terrain horizon elevation profile">
+        <line x1="0" x2={width} y1={y(sunAltitude)} y2={y(sunAltitude)} className="sun-line" />
+        <polyline points={points} className="terrain-line" />
+      </svg>
+      <p>
+        Sun {sunAltitude.toFixed(1)}° high · terrain peak {profile.maxTerrainAngle.toFixed(1)}° · {profile.clearance.toFixed(1)}° clearance
+      </p>
+    </div>
+  );
+}
