@@ -860,62 +860,145 @@ summary:focus-visible {
 }
 
 .horizon-card {
-  margin-top: 12px;
-  padding: 12px;
-  border: 1px solid #d3dfd7;
-  border-radius: 11px;
-  background: #f4faf6;
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
 }
 
 .horizon-card.obstructed {
-  border-color: #e6cfc5;
-  background: #fff7f2;
+  border-color: color-mix(in srgb, var(--rose) 42%, var(--line));
+  background: color-mix(in srgb, var(--rose) 4%, var(--surface));
 }
 
-.horizon-card > div span,
-.horizon-card > div strong {
+.horizon-heading > span,
+.horizon-heading > strong,
+.horizon-heading > small {
   display: block;
 }
 
-.horizon-card > div span {
+.horizon-heading > span {
   color: var(--quiet);
-  font-size: 8px;
+  font-size: 9px;
   font-weight: 650;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
-.horizon-card > div strong {
-  margin-top: 3px;
-  font-size: 11px;
+.horizon-heading > strong {
+  margin-top: 5px;
+  font-size: 15px;
+  line-height: 1.2;
+}
+
+.horizon-heading > small {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .horizon-card svg {
   display: block;
   width: 100%;
-  height: 72px;
-  margin-top: 8px;
+  height: auto;
+  margin-top: 10px;
   overflow: visible;
+}
+
+.terrain-fill {
+  fill: color-mix(in srgb, var(--blue) 14%, var(--surface-2));
 }
 
 .terrain-line {
   fill: none;
   stroke: var(--ink);
-  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
   vector-effect: non-scaling-stroke;
 }
 
-.sun-line {
-  stroke: var(--ochre);
-  stroke-dasharray: 4 3;
-  stroke-width: 1.5;
+.horizon-zero {
+  stroke: var(--line-strong);
+  stroke-dasharray: 2 3;
+  stroke-width: 1;
   vector-effect: non-scaling-stroke;
+}
+
+.view-axis {
+  stroke: var(--blue);
+  stroke-dasharray: 2 3;
+  stroke-width: 1;
+  opacity: 0.55;
+  vector-effect: non-scaling-stroke;
+}
+
+.sun-halo {
+  fill: color-mix(in srgb, var(--action) 24%, transparent);
+}
+
+.sun-marker {
+  fill: var(--action);
+  stroke: var(--ink);
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.sun-label,
+.horizon-label,
+.bearing-label {
+  fill: var(--muted);
+  font: 8.5px var(--font-geist-mono);
+}
+
+.sun-label,
+.bearing-label.active {
+  fill: var(--ink);
+  font-weight: 650;
+}
+
+.horizon-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 3px 0 0;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.horizon-metrics > div {
+  min-width: 0;
+  padding: 0 8px;
+  border-left: 1px solid var(--line);
+}
+
+.horizon-metrics > div:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.horizon-metrics > div:last-child {
+  padding-right: 0;
+}
+
+.horizon-metrics dt {
+  color: var(--quiet);
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.horizon-metrics dd {
+  margin: 2px 0 0;
+  font: 650 11px var(--font-geist-mono);
 }
 
 .horizon-card p {
-  margin: 5px 0 0;
+  margin: 8px 0 0;
   color: var(--muted);
   font-size: 9px;
+  line-height: 1.35;
 }
 
 .precision-details,
@@ -1086,6 +1169,11 @@ summary:focus-visible {
 .legend-swatch.partial {
   height: 0;
   border-top: 1px dashed var(--green);
+}
+
+.legend-swatch.direction {
+  height: 0;
+  border-top: 2px dashed var(--blue);
 }
 
 .timeline-dock {

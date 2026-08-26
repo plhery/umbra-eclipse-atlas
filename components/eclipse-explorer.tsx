@@ -48,6 +48,7 @@ import { TimeOfInterest } from '@astronomy-bundle/core';
 import {
   compassDirection,
   computeLocalResult,
+  destinationPoint,
   eventRegion,
   formatCoordinate,
   formatDateLabel,
@@ -447,6 +448,13 @@ export default function EclipseExplorer() {
     }
   }, [data, selected]);
   const localObservability = observability(local);
+  const maximumViewLine = useMemo(() => {
+    if (!selected || !local?.maximum) return [];
+    return [
+      { lat: selected.lat, lon: selected.lon },
+      destinationPoint(selected, local.maximum.azimuth, 80),
+    ];
+  }, [selected, local]);
   const locationComparisons = useMemo<LocationComparisonItem[]>(() => {
     if (!data) return [];
     const places = [...(selected ? [selected] : []), ...savedPlaces]
@@ -923,8 +931,8 @@ export default function EclipseExplorer() {
 
   useEffect(() => {
     if (!mapReady || !mapRef.current) return;
-    updateProfileLine(mapRef.current, profile?.samples ?? []);
-  }, [mapReady, profile]);
+    updateProfileLine(mapRef.current, maximumViewLine);
+  }, [mapReady, maximumViewLine]);
 
   const togglePlayback = useCallback(() => {
     if (playing) {
@@ -1094,6 +1102,7 @@ export default function EclipseExplorer() {
     setLoadError('');
     setPlaying(false);
     setDrawer(null);
+    setProfile(null);
     setTimelineIntent('auto');
     setEventDate(date);
     setSheetSnap('peek');
@@ -1257,6 +1266,7 @@ export default function EclipseExplorer() {
   const updateSelectedElevation = useCallback(
     (elevation: number) => {
       setElevationStatus('provided');
+      setProfile(null);
       setSelected((current) => (current ? { ...current, elevation } : current));
       if (!selected) return;
       setSavedPlaces((current) => {
@@ -1533,7 +1543,7 @@ export default function EclipseExplorer() {
         local.maximum.altitude,
       );
       setProfile(result);
-      showToast(result.obstructed ? 'Terrain may block the Sun' : 'Sun clears the sampled terrain');
+      showToast(result.obstructed ? 'Terrain may reach the Sun' : 'Terrain skyline is clear');
     } catch {
       showToast('Terrain profile is temporarily unavailable');
     } finally {
@@ -1898,7 +1908,7 @@ export default function EclipseExplorer() {
                       <div className="field-tools">
                         <button type="button" onClick={inspectHorizon} disabled={profileLoading || !local.maximum || localObservability === 'below'}>
                           <Route size={16} aria-hidden="true" />
-                          {profileLoading ? 'Sampling terrain…' : localObservability === 'below' ? 'Sun below horizon' : 'Check the horizon'}
+                          {profileLoading ? 'Building skyline…' : localObservability === 'below' ? 'Sun below horizon' : profile ? 'Rescan horizon' : 'Check the horizon'}
                         </button>
                         <button type="button" onClick={() => exportData('ics')}>
                           <CalendarDays size={16} aria-hidden="true" /> Add to calendar
@@ -1910,6 +1920,8 @@ export default function EclipseExplorer() {
                           <Printer size={16} aria-hidden="true" /> Print field card
                         </button>
                       </div>
+
+                      {profile && <HorizonCard profile={profile} sunAltitude={local.maximum?.altitude ?? 0} />}
 
                       {liveCircumstances && (
                         <div className="sun-moon-card">
@@ -1972,8 +1984,6 @@ export default function EclipseExplorer() {
                           </button>
                         ))}
                       </div>
-
-                      {profile && <HorizonCard profile={profile} sunAltitude={local.maximum?.altitude ?? 0} />}
 
                       <LocationComparison
                         items={locationComparisons}
@@ -2148,6 +2158,7 @@ export default function EclipseExplorer() {
           <span><i className="legend-swatch partial" />Partial visibility</span>
         )}
         {layers.shadow && <span><i className="legend-swatch shadow" />Moving shadow</span>}
+        {!!maximumViewLine.length && <span><i className="legend-swatch direction" />Look toward maximum</span>}
       </div>
 
       {data && (
@@ -2547,13 +2558,14 @@ export default function EclipseExplorer() {
                   <summary><Info size={16} /> About the calculations <ChevronDown size={15} /></summary>
                   <div>
                     <p>Predictions use Besselian elements from NASA’s Five Millennium Canon and astronomy-bundle 9.38.0. Coordinates use WGS84; times can be shown in UTC or the selected IANA time zone.</p>
-                    <p>Map paths are sampled about every 20 seconds. Analysis contours use a 2° grid and 30-minute time intervals. Horizon checks sample terrain in 96 directions; they do not include buildings or vegetation.</p>
+                    <p>Map paths are sampled about every 20 seconds. Analysis contours use a 2° grid and 30-minute time intervals. Horizon checks build a 90° terrain skyline from an elevation model; they do not include buildings or vegetation.</p>
                     <p>Magnitude measures the fraction of the Sun’s diameter covered; obscuration measures its area. C1/C4 mark the partial phase, and C2/C3 bound totality or annularity. Umbra is the central shadow; penumbra is the partial shadow.</p>
                     <p>Small differences are expected from atmospheric refraction, terrain, ΔT, and the Moon’s irregular limb. Verify critical plans with an official source.</p>
                     <p className="safety-note"><Sun size={16} /> Use certified eclipse glasses whenever any bright part of the Sun is visible. Ordinary sunglasses are not safe.</p>
                     <div className="source-links">
                       <a href="https://eclipse.gsfc.nasa.gov/SEcat5/SEcatalog.html" target="_blank" rel="noreferrer">NASA eclipse catalog <ExternalLink size={13} /></a>
                       <a href="https://github.com/andrmoel/astronomy-bundle-js" target="_blank" rel="noreferrer">Calculation library <ExternalLink size={13} /></a>
+                      <a href="https://open-meteo.com/en/docs/elevation-api" target="_blank" rel="noreferrer">Terrain: Open-Meteo / Copernicus DEM <ExternalLink size={13} /></a>
                       <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">Map attributions <ExternalLink size={13} /></a>
                     </div>
                   </div>
@@ -2677,27 +2689,71 @@ function HorizonCard({
   profile: HorizonProfile;
   sunAltitude: number;
 }) {
-  const min = Math.min(-1, ...profile.samples.map((sample) => sample.apparentAngle));
-  const max = Math.max(sunAltitude + 1, ...profile.samples.map((sample) => sample.apparentAngle));
-  const height = 70;
-  const width = 300;
-  const y = (value: number) => height - ((value - min) / Math.max(0.1, max - min)) * height;
-  const points = profile.samples
-    .map((sample, index) => ((index / (profile.samples.length - 1)) * width).toFixed(1) + ',' + y(sample.apparentAngle).toFixed(1))
+  const width = 360;
+  const height = 124;
+  const plotTop = 8;
+  const plotBottom = 96;
+  const angles = profile.skyline.map((sample) => sample.apparentAngle);
+  const min = Math.min(-2, Math.floor(Math.min(...angles) - 1));
+  const max = Math.max(
+    5,
+    Math.ceil(sunAltitude + 1),
+    Math.ceil(Math.max(...angles) + 1),
+  );
+  const y = (value: number) =>
+    plotBottom - ((value - min) / Math.max(0.1, max - min)) * (plotBottom - plotTop);
+  const skylinePoints = profile.skyline
+    .map((sample, index) => {
+      const x = (index / (profile.skyline.length - 1)) * width;
+      return x.toFixed(1) + ',' + y(sample.apparentAngle).toFixed(1);
+    })
     .join(' ');
+  const terrainFill = `0,${plotBottom} ${skylinePoints} ${width},${plotBottom}`;
+  const normalizeBearing = (value: number) => ((value % 360) + 360) % 360;
+  const leftBearing = normalizeBearing(profile.bearing - profile.fieldOfView / 2);
+  const rightBearing = normalizeBearing(profile.bearing + profile.fieldOfView / 2);
+  const sunY = y(sunAltitude);
+  const sunLabelY = sunY < 22 ? sunY + 16 : sunY - 8;
   return (
     <div className={profile.obstructed ? 'horizon-card obstructed' : 'horizon-card clear'}>
-      <div>
-        <span>Horizon toward maximum</span>
-        <strong>{profile.obstructed ? 'Terrain may block the Sun' : 'Clear in this terrain sample'}</strong>
+      <div className="horizon-heading">
+        <span>Terrain skyline · facing {Math.round(profile.bearing)}° {compassDirection(profile.bearing)}</span>
+        <strong>
+          {profile.obstructed
+            ? 'Terrain may cover the Sun ahead'
+            : `Sun clears terrain ahead by ${profile.clearance.toFixed(1)}°`}
+        </strong>
+        <small>90° view around maximum · center line is where to look</small>
       </div>
-      <svg viewBox={'0 0 ' + width + ' ' + height} role="img" aria-label="Terrain horizon elevation profile">
-        <line x1="0" x2={width} y1={y(sunAltitude)} y2={y(sunAltitude)} className="sun-line" />
-        <polyline points={points} className="terrain-line" />
+      <svg
+        viewBox={'0 0 ' + width + ' ' + height}
+        role="img"
+        aria-label={`Estimated terrain skyline from ${Math.round(leftBearing)} to ${Math.round(rightBearing)} degrees. The Sun is ${sunAltitude.toFixed(1)} degrees high at ${Math.round(profile.bearing)} degrees.`}
+      >
+        <line x1="0" x2={width} y1={y(0)} y2={y(0)} className="horizon-zero" />
+        <polygon points={terrainFill} className="terrain-fill" />
+        <polyline points={skylinePoints} className="terrain-line" />
+        <line x1={width / 2} x2={width / 2} y1={plotTop} y2={plotBottom} className="view-axis" />
+        <circle cx={width / 2} cy={sunY} r="8" className="sun-halo" />
+        <circle cx={width / 2} cy={sunY} r="4.5" className="sun-marker" />
+        <text x={width / 2 + 10} y={sunLabelY} className="sun-label">Sun {sunAltitude.toFixed(1)}°</text>
+        <text x="3" y={Math.max(plotTop + 9, y(0) - 4)} className="horizon-label">0° horizon</text>
+        <text x="0" y="118" textAnchor="start" className="bearing-label">
+          {Math.round(leftBearing)}° {compassDirection(leftBearing)}
+        </text>
+        <text x={width / 2} y="118" textAnchor="middle" className="bearing-label active">
+          {Math.round(profile.bearing)}° {compassDirection(profile.bearing)}
+        </text>
+        <text x={width} y="118" textAnchor="end" className="bearing-label">
+          {Math.round(rightBearing)}° {compassDirection(rightBearing)}
+        </text>
       </svg>
-      <p>
-        Sun {sunAltitude.toFixed(1)}° high · terrain peak {profile.maxTerrainAngle.toFixed(1)}° · {profile.clearance.toFixed(1)}° clearance
-      </p>
+      <dl className="horizon-metrics">
+        <div><dt>Sun</dt><dd>{sunAltitude.toFixed(1)}°</dd></div>
+        <div><dt>Terrain ahead</dt><dd>{profile.maxTerrainAngle.toFixed(1)}°</dd></div>
+        <div><dt>Scan range</dt><dd>{Math.round(profile.distanceKm)} km</dd></div>
+      </dl>
+      <p>The ridge is the highest sampled terrain in each direction. Trees, buildings and peak names are not included.</p>
     </div>
   );
 }
