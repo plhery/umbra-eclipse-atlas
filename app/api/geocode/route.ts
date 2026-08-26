@@ -1,6 +1,6 @@
 const NOMINATIM = 'https://nominatim.openstreetmap.org';
 const SITE_ORIGIN =
-  process.env.NEXT_PUBLIC_SITE_URL || 'https://umbra-eclipse-atlas.sites.openai.com';
+  process.env.NEXT_PUBLIC_SITE_URL || 'https://umbra-eclipse-atlas.plhery.chatgpt.site';
 const cache = new Map<string, { body: string; expiresAt: number }>();
 let nextUpstreamRequestAt = 0;
 

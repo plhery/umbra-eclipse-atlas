@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL || 'https://umbra-eclipse-atlas.sites.openai.com',
+    process.env.NEXT_PUBLIC_SITE_URL || 'https://umbra-eclipse-atlas.plhery.chatgpt.site',
   ),
   title: {
     default: 'Umbra — Solar eclipse atlas',
