@@ -1842,6 +1842,15 @@ export default function EclipseExplorer() {
         aria-describedby="map-instructions"
         tabIndex={0}
       />
+      {mapReady && !selected && !presentationMode && (
+        <div className="map-start-hint" role="note">
+          <MapPin size={17} aria-hidden="true" />
+          <span>
+            <strong>Choose any point on the map</strong>
+            <small>Tap or click to see the eclipse there</small>
+          </span>
+        </div>
+      )}
       <p className="sr-only" role="status" aria-live="polite">
         {data
           ? TYPE_LABELS[data.type] + ' eclipse on ' + formatDateLabel(data.date) + '. ' +
