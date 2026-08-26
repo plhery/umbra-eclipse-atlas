@@ -794,10 +794,6 @@ summary:focus-visible {
   background: var(--surface-2);
 }
 
-.contact-row.active {
-  box-shadow: inset 3px 0 var(--event-color);
-}
-
 .contact-code {
   color: var(--event-color);
   font: 650 10px var(--font-geist-mono);
