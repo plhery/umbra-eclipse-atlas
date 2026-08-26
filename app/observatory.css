@@ -599,7 +599,7 @@ summary:focus-visible {
 
 .sun-moon-card {
   min-height: 94px;
-  margin-bottom: 24px;
+  margin: 18px 0 24px;
   border-radius: 0;
   background: transparent;
 }
