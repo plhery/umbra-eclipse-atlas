@@ -10,6 +10,7 @@ import {
   type FormEvent,
 } from 'react';
 import {
+  Accessibility,
   Bookmark,
   CalendarDays,
   Check,
@@ -32,6 +33,7 @@ import {
   Pause,
   Play,
   Printer,
+  Presentation,
   Route,
   Search,
   Share2,
@@ -60,6 +62,7 @@ import {
   type CatalogEntry,
   type EclipseData,
   type EclipseKind,
+  type LocalResult,
   type SelectedLocation,
 } from '@/lib/eclipse';
 import {
@@ -151,6 +154,13 @@ type Drawer = 'catalog' | 'search' | 'layers' | 'more' | null;
 type SheetSnap = 'peek' | 'mid' | 'full';
 type TimeMode = 'local' | 'utc';
 type DistanceUnit = 'metric' | 'imperial';
+type TimelineIntent = 'auto' | 'manual' | 'now';
+type LocationComparisonItem = {
+  key: string;
+  place: SelectedLocation;
+  result: LocalResult;
+  zone: string;
+};
 
 function getInitialUrlState() {
   if (typeof window === 'undefined') return null;
@@ -209,6 +219,7 @@ function getInitialUrlState() {
     nightOpacity: numberParam('nightOpacity', 0.15, 0.95) ?? 0.62,
     timezoneOverride,
     time: time && !Number.isNaN(Date.parse(time)) ? new Date(time).getTime() : null,
+    presentation: params.get('present') === '1',
   };
 }
 
@@ -228,6 +239,19 @@ function xmlEscape(value: string) {
 
 function icsDate(date: Date) {
   return date.toISOString().replaceAll('-', '').replaceAll(':', '').replace(/\.\d{3}/, '');
+}
+
+function icsEscape(value: string) {
+  return value
+    .replaceAll('\\', '\\\\')
+    .replaceAll('\n', '\\n')
+    .replaceAll(',', '\\,')
+    .replaceAll(';', '\\;');
+}
+
+function csvCell(value: string | number) {
+  const text = String(value);
+  return /[",\n]/.test(text) ? '"' + text.replaceAll('"', '""') + '"' : text;
 }
 
 function downloadText(filename: string, type: string, value: string) {
@@ -251,18 +275,49 @@ function distanceLabel(km: number, unit: DistanceUnit) {
   return km.toFixed(km < 10 ? 1 : 0) + ' km';
 }
 
-function typeSentence(type: string) {
+function locationKey(place: Pick<SelectedLocation, 'lat' | 'lon'>) {
+  return place.lat.toFixed(5) + ':' + place.lon.toFixed(5);
+}
+
+function observability(local: LocalResult | null) {
+  if (!local || local.type === 'none') return 'outside' as const;
+  if ((local.maximum?.altitude ?? -90) > -0.8) return 'visible' as const;
+  if (
+    local.contacts.some(
+      (contact) => contact.key.startsWith('c') && contact.altitude > -0.8,
+    )
+  ) {
+    return 'partial' as const;
+  }
+  return 'below' as const;
+}
+
+function typeSentence(type: string, horizon: ReturnType<typeof observability> = 'visible') {
+  if (horizon === 'below') return 'Eclipse stays below the horizon here';
+  if (horizon === 'partial') return 'Part of the eclipse is above the horizon';
   if (type === 'total') return 'Total eclipse at this location';
   if (type === 'annular') return 'Annular eclipse at this location';
   if (type === 'partial') return 'Partial eclipse at this location';
   return 'Not visible at this location';
 }
 
-function typeDetail(type: string) {
+function typeDetail(type: string, horizon: ReturnType<typeof observability> = 'visible') {
+  if (horizon === 'below') return 'The Sun is below the horizon throughout the local eclipse.';
+  if (horizon === 'partial') return 'Sunrise or sunset cuts through the local eclipse.';
   if (type === 'total') return 'The Sun is fully covered between C2 and C3.';
   if (type === 'annular') return 'A bright ring remains between C2 and C3.';
   if (type === 'partial') return 'The Moon covers part of the Sun.';
   return 'Try another point inside the shaded visibility area.';
+}
+
+function safetySentence(type: string, horizon: ReturnType<typeof observability>) {
+  if (horizon === 'below' || type === 'none') {
+    return 'Never look at the bright Sun without certified eclipse glasses.';
+  }
+  if (type === 'total') {
+    return 'Glasses may come off only during totality, between C2 and C3. Put them back on as totality ends.';
+  }
+  return 'Keep certified eclipse glasses on throughout the eclipse.';
 }
 
 function compareEclipseDates(a: string, b: string) {
@@ -274,16 +329,20 @@ function compareEclipseDates(a: string, b: string) {
 export default function EclipseExplorer() {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const eventPanelScrollRef = useRef<HTMLDivElement>(null);
+  const drawerRef = useRef<HTMLElement>(null);
+  const drawerReturnFocusRef = useRef<HTMLElement | null>(null);
+  const previousDrawerRef = useRef<Drawer>(null);
+  const presentationLayersRef = useRef<LayerVisibility | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const choosePointRef = useRef<
     (lat: number, lon: number, name?: string, accuracy?: number, elevation?: number) => void
   >(() => undefined);
-  const watchIdRef = useRef<number | null>(null);
   const urlStateRef = useRef<ReturnType<typeof getInitialUrlState>>(null);
   const initialMapViewHandledRef = useRef(false);
   const contourDateRef = useRef<string | null>(null);
   const lastCursorUpdateRef = useRef(0);
   const playbackTimeRef = useRef(0);
+  const selectionRequestRef = useRef(0);
 
   const [eventDate, setEventDate] = useState(DEFAULT_DATE);
   const [data, setData] = useState<EclipseData | null>(null);
@@ -298,6 +357,7 @@ export default function EclipseExplorer() {
   const [nightOpacity, setNightOpacity] = useState(0.62);
   const [timeMs, setTimeMs] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [timelineIntent, setTimelineIntent] = useState<TimelineIntent>('auto');
   const [timeMode, setTimeMode] = useState<TimeMode>('local');
   const [timezoneOverride, setTimezoneOverride] = useState('');
   const [distanceUnit, setDistanceUnit] = useState<DistanceUnit>('metric');
@@ -314,11 +374,16 @@ export default function EclipseExplorer() {
     zoom: 2,
   });
   const [tracking, setTracking] = useState(false);
+  const [locationError, setLocationError] = useState('');
+  const [elevationStatus, setElevationStatus] = useState<
+    'loading' | 'measured' | 'provided' | 'unavailable'
+  >('provided');
   const [toast, setToast] = useState('');
   const [savedPlaces, setSavedPlaces] = useState<SelectedLocation[]>([]);
   const [profile, setProfile] = useState<HorizonProfile | null>(null);
   const [profileLoading, setProfileLoading] = useState(false);
   const [comparisonDates, setComparisonDates] = useState<string[]>([]);
+  const [presentationMode, setPresentationMode] = useState(false);
 
   useEffect(() => {
     playbackTimeRef.current = timeMs;
@@ -368,6 +433,44 @@ export default function EclipseExplorer() {
       return null;
     }
   }, [data, selected]);
+  const localObservability = observability(local);
+  const locationComparisons = useMemo<LocationComparisonItem[]>(() => {
+    if (!data) return [];
+    const places = [...(selected ? [selected] : []), ...savedPlaces]
+      .filter(
+        (place, index, items) =>
+          items.findIndex((candidate) => locationKey(candidate) === locationKey(place)) === index,
+      )
+      .slice(0, 8);
+    return places.flatMap((place) => {
+      try {
+        return [
+          {
+            key: locationKey(place),
+            place,
+            result: computeLocalResult(data, place),
+            zone: (() => {
+              try {
+                return tzLookup(place.lat, place.lon);
+              } catch {
+                return 'UTC';
+              }
+            })(),
+          },
+        ];
+      } catch {
+        return [];
+      }
+    });
+  }, [data, selected, savedPlaces]);
+  const bestComparisonKey = useMemo(() => {
+    const visible = locationComparisons.filter((item) => item.result.type !== 'none');
+    return visible.sort(
+      (left, right) =>
+        right.result.obscuration - left.result.obscuration ||
+        (right.result.maximum?.altitude ?? -90) - (left.result.maximum?.altitude ?? -90),
+    )[0]?.key;
+  }, [locationComparisons]);
   const liveCircumstances = useMemo(() => {
     if (!local?.localEclipse || !timeMs) return null;
     try {
@@ -388,6 +491,33 @@ export default function EclipseExplorer() {
 
   const displayZone =
     timeMode === 'local' && selected ? timezoneOverride || timezone : 'UTC';
+  const mapSummary = useMemo(() => {
+    if (!data) return 'The eclipse map is loading.';
+    const summary = [
+      TYPE_LABELS[data.type] + ' solar eclipse on ' + formatDateLabel(data.date) + '.',
+      'The mapped route is ' + eventRegion(data.date, data.greatest) + '.',
+      'Greatest eclipse is near ' +
+        formatCoordinate(data.greatest.lat, true) +
+        ', ' +
+        formatCoordinate(data.greatest.lon, false) +
+        ' at ' +
+        formatTime(data.greatestTime, 'UTC') + '.',
+    ];
+    if (selected && local) {
+      summary.push(typeSentence(local.type, localObservability) + '.');
+      if (local.type !== 'none' && local.maximum) {
+        summary.push(
+          percent(local.obscuration) +
+            ' of the Sun is covered, with maximum at ' +
+            formatTime(local.maximum.date, displayZone) +
+            '.',
+        );
+      }
+    } else {
+      summary.push('Choose a location to calculate local visibility and times.');
+    }
+    return summary.join(' ');
+  }, [data, selected, local, localObservability, displayZone]);
   const timelineBounds = useMemo(() => {
     if (!data) return { start: 0, end: 1 };
     const eclipseContacts = local?.contacts.filter((contact) => contact.key.startsWith('c'));
@@ -399,6 +529,24 @@ export default function EclipseExplorer() {
     0,
     Math.min(1, (timeMs - timelineBounds.start) / (timelineBounds.end - timelineBounds.start)),
   );
+  const maximumTimelinePercent = Math.max(
+    0,
+    Math.min(
+      100,
+      (((local?.maximum?.date.getTime() ?? data?.greatestTime.getTime() ?? timelineBounds.start) -
+        timelineBounds.start) /
+        (timelineBounds.end - timelineBounds.start)) *
+        100,
+    ),
+  );
+  const nowAvailable = Date.now() >= timelineBounds.start && Date.now() <= timelineBounds.end;
+  const timelineStatus = playing
+    ? 'Playing'
+    : timelineIntent === 'now'
+      ? 'Now'
+      : Math.abs(timeMs - (local?.maximum?.date.getTime() ?? data?.greatestTime.getTime() ?? 0)) < 30_000
+        ? 'Maximum'
+        : 'Viewing';
 
   const showToast = useCallback((message: string) => {
     setToast(message);
@@ -413,6 +561,7 @@ export default function EclipseExplorer() {
       accuracy?: number,
       elevation?: number,
     ) => {
+      const requestId = ++selectionRequestRef.current;
       const provisional: SelectedLocation = {
         lat: Math.max(-90, Math.min(90, lat)),
         lon: ((((lon + 180) % 360) + 360) % 360) - 180,
@@ -423,6 +572,7 @@ export default function EclipseExplorer() {
       setSelected(provisional);
       setTimezoneOverride('');
       setProfile(null);
+      setElevationStatus(elevation === undefined ? 'loading' : 'provided');
       setSheetSnap('mid');
       mapRef.current?.easeTo({
         center: [provisional.lon, provisional.lat],
@@ -438,14 +588,29 @@ export default function EclipseExplorer() {
           ? fetchElevation(provisional.lat, provisional.lon)
           : Promise.resolve(elevation),
       ]).then(([resolvedName, resolvedElevation]) => {
+        if (selectionRequestRef.current !== requestId) return;
+        if (elevation === undefined) {
+          setElevationStatus(resolvedElevation.status === 'fulfilled' ? 'measured' : 'unavailable');
+        }
+        const resolvedPlace: SelectedLocation = {
+          ...provisional,
+          name: resolvedName.status === 'fulfilled' ? resolvedName.value : provisional.name,
+          elevation:
+            resolvedElevation.status === 'fulfilled'
+              ? Math.round(resolvedElevation.value)
+              : provisional.elevation,
+        };
         setSelected((current) => {
           if (!current || current.lat !== provisional.lat || current.lon !== provisional.lon) return current;
-          return {
-            ...current,
-            name: resolvedName.status === 'fulfilled' ? resolvedName.value : current.name,
-            elevation:
-              resolvedElevation.status === 'fulfilled' ? Math.round(resolvedElevation.value) : current.elevation,
-          };
+          return { ...current, name: resolvedPlace.name, elevation: resolvedPlace.elevation };
+        });
+        setSavedPlaces((current) => {
+          const index = current.findIndex((place) => locationKey(place) === locationKey(provisional));
+          if (index < 0) return current;
+          const next = [...current];
+          next[index] = { ...next[index], name: resolvedPlace.name, elevation: resolvedPlace.elevation };
+          localStorage.setItem('umbra-saved-places', JSON.stringify(next));
+          return next;
         });
       });
     },
@@ -464,6 +629,7 @@ export default function EclipseExplorer() {
     setLayers(initial.layers);
     setNightOpacity(initial.nightOpacity);
     setTimezoneOverride(initial.timezoneOverride);
+    setPresentationMode(initial.presentation);
     setMapCenter({ lat: initial.center[1], lon: initial.center[0], zoom: initial.zoom });
     if (initial.selected) {
       choosePoint(
@@ -475,7 +641,10 @@ export default function EclipseExplorer() {
       );
       setTimezoneOverride(initial.timezoneOverride);
     }
-    if (initial.time) setTimeMs(initial.time);
+    if (initial.time) {
+      setTimeMs(initial.time);
+      setTimelineIntent('manual');
+    }
     try {
       const stored = JSON.parse(localStorage.getItem('umbra-saved-places') || '[]') as SelectedLocation[];
       setSavedPlaces(Array.isArray(stored) ? stored.slice(0, 12) : []);
@@ -483,6 +652,24 @@ export default function EclipseExplorer() {
       setSavedPlaces([]);
     }
   }, [choosePoint]);
+
+  useEffect(() => {
+    const previous = previousDrawerRef.current;
+    if (drawer && !previous) {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement) drawerReturnFocusRef.current = active;
+      window.requestAnimationFrame(() => {
+        const target =
+          drawer === 'search'
+            ? drawerRef.current?.querySelector<HTMLElement>('input')
+            : drawerRef.current?.querySelector<HTMLElement>('[data-drawer-heading]');
+        target?.focus();
+      });
+    } else if (!drawer && previous) {
+      window.requestAnimationFrame(() => drawerReturnFocusRef.current?.focus());
+    }
+    previousDrawerRef.current = drawer;
+  }, [drawer]);
 
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
@@ -552,7 +739,6 @@ export default function EclipseExplorer() {
     });
     return () => {
       disposed = true;
-      if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current);
       mapRef.current?.remove();
       mapRef.current = null;
     };
@@ -648,10 +834,35 @@ export default function EclipseExplorer() {
   const localMaximumMs = local?.maximum?.date.getTime() ?? null;
 
   useEffect(() => {
+    if (timelineIntent !== 'auto') return;
+    const now = Date.now();
+    if (now >= timelineBounds.start && now <= timelineBounds.end) {
+      const timeout = window.setTimeout(() => {
+        setTimelineIntent('now');
+        setTimeMs(now);
+      }, 0);
+      return () => window.clearTimeout(timeout);
+    }
     if (!localMaximumMs) return;
     const timeout = window.setTimeout(() => setTimeMs(localMaximumMs), 0);
     return () => window.clearTimeout(timeout);
-  }, [localMaximumMs]);
+  }, [localMaximumMs, timelineIntent, timelineBounds.start, timelineBounds.end]);
+
+  useEffect(() => {
+    if (timelineIntent !== 'now' || playing) return;
+    const syncNow = () => {
+      if (document.visibilityState === 'visible') {
+        setTimeMs(Math.max(timelineBounds.start, Math.min(timelineBounds.end, Date.now())));
+      }
+    };
+    syncNow();
+    const interval = window.setInterval(syncNow, 1_000);
+    document.addEventListener('visibilitychange', syncNow);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', syncNow);
+    };
+  }, [timelineIntent, playing, timelineBounds.start, timelineBounds.end]);
 
   useEffect(() => {
     if (!playing || !data) return;
@@ -702,6 +913,7 @@ export default function EclipseExplorer() {
   const togglePlayback = useCallback(() => {
     if (playing) {
       setPlaying(false);
+      setTimelineIntent('manual');
       return;
     }
     const start =
@@ -710,78 +922,116 @@ export default function EclipseExplorer() {
         : Math.max(timelineBounds.start, playbackTimeRef.current);
     playbackTimeRef.current = start;
     setTimeMs(start);
+    setTimelineIntent('manual');
     setPlaying(true);
   }, [playing, timelineBounds.end, timelineBounds.start]);
 
   const startLocationTracking = useCallback(() => {
     if (!('geolocation' in navigator)) {
-      showToast('Location is not available in this browser');
+      const message = 'Location is not available in this browser. Search for a place instead.';
+      setLocationError(message);
+      showToast(message);
       return;
     }
-    if (watchIdRef.current !== null) {
-      navigator.geolocation.clearWatch(watchIdRef.current);
-      watchIdRef.current = null;
-      setTracking(false);
-      showToast('Location tracking stopped');
-      return;
-    }
+    if (tracking) return;
     setTimezoneOverride('');
+    setLocationError('');
     setTracking(true);
-    watchIdRef.current = navigator.geolocation.watchPosition(
+    navigator.geolocation.getCurrentPosition(
       (position) => {
         const { latitude, longitude, accuracy, altitude } = position.coords;
-        setSelected((current) => ({
-          lat: latitude,
-          lon: longitude,
-          accuracy,
-          elevation: altitude ?? current?.elevation ?? 0,
-          name: 'My location',
-        }));
-        mapRef.current?.easeTo({
-          center: [longitude, latitude],
-          zoom: Math.max(8, mapRef.current.getZoom()),
-          duration: 550,
-        });
-        setSheetSnap('mid');
+        choosePoint(latitude, longitude, 'My location', accuracy, altitude ?? undefined);
+        setTracking(false);
       },
       () => {
         setTracking(false);
-        if (watchIdRef.current !== null) navigator.geolocation.clearWatch(watchIdRef.current);
-        watchIdRef.current = null;
-        showToast('Allow location access to use this tool');
+        const message = 'Location access was not available. Search for a place or try again.';
+        setLocationError(message);
+        showToast(message);
       },
-      { enableHighAccuracy: true, maximumAge: 10_000, timeout: 15_000 },
+      { enableHighAccuracy: true, maximumAge: 60_000, timeout: 15_000 },
     );
-  }, [showToast]);
+  }, [tracking, choosePoint, showToast]);
+
+  const enterPresentation = useCallback(() => {
+    presentationLayersRef.current = layers;
+    setLayers({ ...LAYER_PRESETS.explain });
+    setDrawer(null);
+    setPresentationMode(true);
+    setSheetSnap('peek');
+    window.requestAnimationFrame(() => {
+      if (data && mapRef.current) fitEclipse(mapRef.current, data, 0);
+    });
+  }, [data, layers]);
+
+  const exitPresentation = useCallback(() => {
+    if (presentationLayersRef.current) {
+      setLayers(presentationLayersRef.current);
+      presentationLayersRef.current = null;
+    }
+    setPresentationMode(false);
+    window.requestAnimationFrame(() => {
+      if (data && mapRef.current) {
+        fitEclipse(mapRef.current, data, window.innerWidth > 760 ? 410 : 0);
+      }
+      drawerReturnFocusRef.current?.focus();
+    });
+  }, [data]);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      const typing = target?.tagName === 'INPUT' || target?.tagName === 'TEXTAREA' || target?.isContentEditable;
       if (event.key === 'Escape') {
-        setDrawer(null);
+        if (drawer) setDrawer(null);
+        else if (presentationMode) exitPresentation();
         return;
       }
-      if (typing) return;
-      if (event.key === '/' || ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k')) {
+      if (event.key === 'Tab' && drawer && drawerRef.current) {
+        const focusable = Array.from(
+          drawerRef.current.querySelectorAll<HTMLElement>(
+            'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])',
+          ),
+        );
+        if (focusable.length) {
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        }
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
         setDrawer('search');
-      } else if (event.key.toLowerCase() === 'c') {
-        setDrawer('catalog');
-      } else if (event.key.toLowerCase() === 'l') {
-        startLocationTracking();
-      } else if (event.code === 'Space') {
+        return;
+      }
+      const interactive = target?.closest(
+        'button, a, input, select, textarea, summary, [contenteditable="true"], [role]:not([role="region"])',
+      );
+      if (interactive) return;
+      const inTimelineOrMap = target?.closest('.timeline-dock, .atlas-map');
+      if (!inTimelineOrMap) return;
+      if (event.code === 'Space') {
         event.preventDefault();
         togglePlayback();
       } else if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        setTimelineIntent('manual');
         setTimeMs((value) => Math.max(timelineBounds.start, value - 60_000));
       } else if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        setTimelineIntent('manual');
         setTimeMs((value) => Math.min(timelineBounds.end, value + 60_000));
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [startLocationTracking, togglePlayback, timelineBounds]);
+  }, [drawer, presentationMode, exitPresentation, togglePlayback, timelineBounds]);
 
   useEffect(() => {
     if (!data || playing) return;
@@ -804,6 +1054,7 @@ export default function EclipseExplorer() {
     if (Math.abs(nightOpacity - 0.62) > 0.01) {
       params.set('nightOpacity', nightOpacity.toFixed(2));
     }
+    if (presentationMode) params.set('present', '1');
     if (Math.abs(timeMs - data.greatestTime.getTime()) > 60_000) {
       params.set('t', new Date(timeMs).toISOString());
     }
@@ -819,6 +1070,7 @@ export default function EclipseExplorer() {
     nightOpacity,
     timeMs,
     playing,
+    presentationMode,
   ]);
 
   const changeEvent = useCallback(async (date: string) => {
@@ -826,6 +1078,7 @@ export default function EclipseExplorer() {
     setLoadError('');
     setPlaying(false);
     setDrawer(null);
+    setTimelineIntent('auto');
     setEventDate(date);
     setSheetSnap('peek');
   }, []);
@@ -939,9 +1192,32 @@ export default function EclipseExplorer() {
     [placeQuery, choosePoint],
   );
 
+  const submitCoordinates = useCallback(
+    (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      const values = new FormData(event.currentTarget);
+      const lat = Number(values.get('latitude'));
+      const lon = Number(values.get('longitude'));
+      if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+        setPlaceError('Use a latitude from −90 to 90 and longitude from −180 to 180.');
+        return;
+      }
+      setPlaceError('');
+      choosePoint(lat, lon);
+      setDrawer(null);
+    },
+    [choosePoint],
+  );
+
   const choosePlace = useCallback(
     (place: PlaceResult | SelectedLocation) => {
-      choosePoint(place.lat, place.lon, place.name, 'accuracy' in place ? place.accuracy : undefined);
+      choosePoint(
+        place.lat,
+        place.lon,
+        place.name,
+        'accuracy' in place ? place.accuracy : undefined,
+        'elevation' in place ? place.elevation : undefined,
+      );
       setDrawer(null);
     },
     [choosePoint],
@@ -962,6 +1238,23 @@ export default function EclipseExplorer() {
     showToast(exists ? 'Place removed' : 'Place saved on this device');
   }, [selected, savedPlaces, showToast]);
 
+  const updateSelectedElevation = useCallback(
+    (elevation: number) => {
+      setElevationStatus('provided');
+      setSelected((current) => (current ? { ...current, elevation } : current));
+      if (!selected) return;
+      setSavedPlaces((current) => {
+        const index = current.findIndex((place) => locationKey(place) === locationKey(selected));
+        if (index < 0) return current;
+        const next = [...current];
+        next[index] = { ...next[index], elevation };
+        localStorage.setItem('umbra-saved-places', JSON.stringify(next));
+        return next;
+      });
+    },
+    [selected],
+  );
+
   const copyText = useCallback(
     async (value: string, message = 'Copied') => {
       try {
@@ -975,9 +1268,17 @@ export default function EclipseExplorer() {
   );
 
   const shareView = useCallback(async () => {
+    const localSummary =
+      selected && local
+        ? typeSentence(local.type, observability(local)) +
+          (local.maximum
+            ? ' — ' + percent(local.obscuration) + ' covered, maximum ' +
+              formatTime(local.maximum.date, timezoneOverride || timezone)
+            : '')
+        : '';
     const payload = {
       title: data ? formatDateLabel(data.date) + ' solar eclipse' : 'Umbra eclipse map',
-      text: selected ? 'Eclipse circumstances for ' + selected.name : 'Explore this solar eclipse',
+      text: selected ? selected.name + ': ' + localSummary : 'Explore this solar eclipse',
       url: window.location.href,
     };
     try {
@@ -986,7 +1287,7 @@ export default function EclipseExplorer() {
     } catch {
       // Sharing was cancelled.
     }
-  }, [data, selected, copyText]);
+  }, [data, selected, local, timezone, timezoneOverride, copyText]);
 
   const exportData = useCallback(
     async (kind: 'geojson' | 'kml' | 'kmz' | 'gpx' | 'csv' | 'ics') => {
@@ -1113,11 +1414,44 @@ export default function EclipseExplorer() {
           showToast('Choose a location to export local contacts');
           return;
         }
+        const localZone = timezoneOverride || timezone;
+        const generatedAt = new Date().toISOString();
         const rows = [
-          ['contact', 'utc_time', 'altitude_deg', 'azimuth_deg', 'magnitude', 'obscuration'],
+          [
+            'schema_version',
+            'generated_at',
+            'eclipse_date',
+            'global_type',
+            'saros',
+            'site_name',
+            'latitude_deg',
+            'longitude_deg',
+            'elevation_m',
+            'timezone',
+            'local_type',
+            'contact',
+            'utc_time',
+            'local_time',
+            'altitude_deg',
+            'azimuth_deg',
+            'magnitude',
+            'obscuration',
+          ],
           ...local.contacts.map((contact) => [
+            '1',
+            generatedAt,
+            data.date,
+            data.type,
+            data.saros,
+            selected.name,
+            selected.lat.toFixed(6),
+            selected.lon.toFixed(6),
+            selected.elevation.toFixed(1),
+            localZone,
+            local.type,
             contact.shortLabel,
             contact.date.toISOString(),
+            formatTime(contact.date, localZone),
             contact.altitude.toFixed(3),
             contact.azimuth.toFixed(3),
             contact.magnitude.toFixed(6),
@@ -1127,28 +1461,37 @@ export default function EclipseExplorer() {
         downloadText(
           baseName + '-' + selected.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() + '.csv',
           'text/csv',
-          rows.map((row) => row.join(',')).join('\n'),
+          rows.map((row) => row.map(csvCell).join(',')).join('\n'),
         );
       } else {
         const first = local?.contacts.find((contact) => contact.key === 'c1')?.date ?? data.rangeStart;
         const last = local?.contacts.find((contact) => contact.key === 'c4')?.date ?? data.rangeEnd;
-        const description =
-          'Solar eclipse' +
-          (selected ? ' from ' + selected.name : '') +
-          '. Check local weather and use certified eclipse eye protection.';
+        const localKind = local?.type && local.type !== 'none'
+          ? local.type.charAt(0).toUpperCase() + local.type.slice(1)
+          : TYPE_LABELS[data.type];
+        const description = [
+          local && selected ? typeSentence(local.type, observability(local)) + ' from ' + selected.name + '.' : TYPE_LABELS[data.type] + ' solar eclipse.',
+          local?.maximum ? percent(local.obscuration) + ' of the Sun covered at maximum ' + formatTime(local.maximum.date, timezoneOverride || timezone) + '.' : '',
+          local?.maximum ? 'Sun ' + local.maximum.altitude.toFixed(1) + '° high toward ' + Math.round(local.maximum.azimuth) + '°.' : '',
+          local ? safetySentence(local.type, observability(local)) : 'Use certified eclipse eye protection.',
+          'Check weather and official local guidance before travel.',
+        ].filter(Boolean).join(' ');
+        const uidLocation = selected
+          ? '-' + selected.lat.toFixed(5).replace('-', 'm') + '-' + selected.lon.toFixed(5).replace('-', 'm')
+          : '-global';
         const ics = [
           'BEGIN:VCALENDAR',
           'VERSION:2.0',
           'PRODID:-//Umbra//Solar Eclipse Atlas//EN',
           'BEGIN:VEVENT',
-          'UID:' + data.date + '@umbra.eclipse',
+          'UID:' + data.date + uidLocation + '@umbra.eclipse',
           'DTSTAMP:' + icsDate(new Date()),
           'DTSTART:' + icsDate(first),
           'DTEND:' + icsDate(last),
-          'SUMMARY:' + TYPE_LABELS[data.type] + ' solar eclipse',
-          'DESCRIPTION:' + description.replaceAll(',', '\\,'),
-          selected ? 'LOCATION:' + selected.name.replaceAll(',', '\\,') : '',
-          'URL:' + window.location.href,
+          'SUMMARY:' + icsEscape(localKind + ' solar eclipse' + (selected ? ' · ' + selected.name : '')),
+          'DESCRIPTION:' + icsEscape(description),
+          selected ? 'LOCATION:' + icsEscape(selected.name) : '',
+          'URL:' + icsEscape(window.location.href),
           'END:VEVENT',
           'END:VCALENDAR',
         ]
@@ -1158,7 +1501,7 @@ export default function EclipseExplorer() {
       }
       showToast(kind.toUpperCase() + ' downloaded');
     },
-    [data, selected, local, showToast],
+    [data, selected, local, timezone, timezoneOverride, showToast],
   );
 
   const inspectHorizon = useCallback(async () => {
@@ -1230,8 +1573,29 @@ export default function EclipseExplorer() {
   const eventStyle = { '--event-color': eventColor } as CSSProperties;
 
   return (
-    <main className={'atlas-app sheet-' + sheetSnap} style={eventStyle}>
-      <div ref={mapContainerRef} className="atlas-map" role="region" aria-label="Interactive solar eclipse map" />
+    <main
+      className={'atlas-app sheet-' + sheetSnap + (presentationMode ? ' presentation-mode' : '')}
+      style={eventStyle}
+    >
+      <a className="skip-link" href="#eclipse-details">Skip interactive map</a>
+      <p id="map-instructions" className="sr-only">
+        Pan and zoom with touch, pointer, or the map controls. Select a point to calculate local
+        circumstances. Use the text map summary in More for a non-visual description.
+      </p>
+      <div
+        ref={mapContainerRef}
+        className="atlas-map"
+        role="region"
+        aria-label="Interactive solar eclipse map"
+        aria-describedby="map-instructions"
+        tabIndex={0}
+      />
+      <p className="sr-only" role="status" aria-live="polite">
+        {data
+          ? TYPE_LABELS[data.type] + ' eclipse on ' + formatDateLabel(data.date) + '. ' +
+            (selected && local ? typeSentence(local.type, localObservability) + ' for ' + selected.name + '.' : '')
+          : 'Loading eclipse.'}
+      </p>
 
       <header className="topbar">
         <button
@@ -1258,13 +1622,30 @@ export default function EclipseExplorer() {
             onClick={() => setDrawer(drawer === 'more' ? null : 'more')}
             aria-label="Open menu"
             aria-expanded={drawer === 'more'}
+            data-open-more
           >
             <Menu size={19} aria-hidden="true" />
           </button>
         </div>
       </header>
 
-      <aside className="event-panel" aria-label="Eclipse details">
+      {presentationMode && data && (
+        <section className="presentation-card" aria-label="Presentation caption">
+          <div>
+            <span>{formatDateLabel(data.date)} · {TYPE_LABELS[data.type]}</span>
+            <strong>{eventRegion(data.date, data.greatest)}</strong>
+            <small>
+              Shading shows where a partial eclipse is visible; the band is the central path and
+              the line marks its center. Move the timeline to follow the Moon’s shadow.
+            </small>
+          </div>
+          <button type="button" onClick={exitPresentation}>
+            <X size={16} aria-hidden="true" /> Exit
+          </button>
+        </section>
+      )}
+
+      <aside id="eclipse-details" className="event-panel" aria-label="Eclipse details">
         <button className="sheet-grabber" type="button" onClick={cycleSheet} aria-label="Resize details panel">
           <span />
         </button>
@@ -1284,7 +1665,7 @@ export default function EclipseExplorer() {
           </div>
 
           {loadError ? (
-            <div className="panel-error">
+            <div className="panel-error" role="alert">
               <strong>That eclipse could not be opened.</strong>
               <span>{loadError}</span>
               <button type="button" onClick={openCatalog}>Browse the catalog</button>
@@ -1312,10 +1693,20 @@ export default function EclipseExplorer() {
                   </div>
                   <div className="choose-actions">
                     <button type="button" onClick={() => setDrawer('search')}>Search a place</button>
-                    <button type="button" onClick={startLocationTracking}>
-                      <LocateFixed size={15} aria-hidden="true" /> Use my location
+                    <button type="button" onClick={startLocationTracking} disabled={tracking}>
+                      <LocateFixed size={15} aria-hidden="true" /> {tracking ? 'Finding…' : 'Use my location'}
                     </button>
                   </div>
+                  {savedPlaces[0] && (
+                    <button
+                      className="recent-place"
+                      type="button"
+                      onClick={() => choosePoint(savedPlaces[0].lat, savedPlaces[0].lon, savedPlaces[0].name, savedPlaces[0].accuracy, savedPlaces[0].elevation)}
+                    >
+                      <Bookmark size={14} fill="currentColor" aria-hidden="true" /> Saved: {savedPlaces[0].name}
+                    </button>
+                  )}
+                  {locationError && <p className="location-error" role="alert">{locationError}</p>}
                 </section>
               ) : (
                 <section className="local-section">
@@ -1327,6 +1718,10 @@ export default function EclipseExplorer() {
                         {formatCoordinate(selected.lat, true)} · {formatCoordinate(selected.lon, false)}
                         {selected.elevation ? ' · ' + Math.round(selected.elevation) + ' m' : ''}
                       </p>
+                      {elevationStatus === 'loading' && <small className="elevation-status">Finding elevation…</small>}
+                      {elevationStatus === 'unavailable' && (
+                        <small className="elevation-status warning">Elevation unavailable; calculations assume 0 m.</small>
+                      )}
                     </div>
                     <button
                       className={currentIsSaved ? 'mini-icon active' : 'mini-icon'}
@@ -1338,30 +1733,74 @@ export default function EclipseExplorer() {
                     </button>
                   </div>
 
-                  <div className={'visibility-verdict verdict-' + (local?.type ?? 'none')}>
+                  <div className={'visibility-verdict verdict-' + (local?.type ?? 'none') + ' observability-' + localObservability}>
                     <span className="verdict-icon">{local?.type === 'none' ? <Moon size={19} /> : <Sun size={19} />}</span>
                     <div>
-                      <strong>{typeSentence(local?.type ?? 'none')}</strong>
-                      <span>{typeDetail(local?.type ?? 'none')}</span>
+                      <strong>{typeSentence(local?.type ?? 'none', localObservability)}</strong>
+                      {local && local.type !== 'none' && local.maximum && (
+                        <span className="verdict-metrics">
+                          {percent(local.obscuration)} covered · maximum {formatTime(local.maximum.date, displayZone).replace(/ [A-Z+].*$/, '')}
+                        </span>
+                      )}
+                      <span className="verdict-detail">{typeDetail(local?.type ?? 'none', localObservability)}</span>
                     </div>
                   </div>
+
+                  <p className="inline-safety"><Sun size={15} aria-hidden="true" />{safetySentence(local?.type ?? 'none', localObservability)}</p>
+
+                  {local?.type === 'none' && (
+                    <div className="not-visible-actions">
+                      <button type="button" onClick={() => setDrawer('search')}>Change place</button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSheetSnap('peek');
+                          if (data && mapRef.current) fitEclipse(mapRef.current, data, window.innerWidth > 760 ? 410 : 0);
+                        }}
+                      >
+                        Show visibility area
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setVisibleHere(true);
+                          setCentralOnly(false);
+                          setCatalogSearched(false);
+                          setDrawer('catalog');
+                          window.setTimeout(() => document.querySelector<HTMLButtonElement>('[data-catalog-search]')?.click(), 80);
+                        }}
+                      >
+                        Find an eclipse visible here
+                      </button>
+                    </div>
+                  )}
 
                   {local && local.type !== 'none' && (
                     <>
                       <div className="local-stats">
-                        <div><span>Maximum</span><strong>{local.magnitude.toFixed(3)}</strong></div>
+                        <div><span>Maximum time</span><strong>{local.maximum ? formatTime(local.maximum.date, displayZone).replace(/ [A-Z+].*$/, '') : '—'}</strong></div>
                         <div><span>Sun covered</span><strong>{percent(local.obscuration)}</strong></div>
-                        <div><span>{local.type === 'partial' ? 'Partial phase' : local.type === 'total' ? 'Totality' : 'Annularity'}</span><strong>{formatDuration(local.type === 'partial' ? local.durationSeconds : local.centralDurationSeconds, true)}</strong></div>
                         <div>
-                          <span>
-                            {local.type === 'partial'
-                              ? data?.geometry.umbra.length
-                                ? 'Central path edge'
-                                : 'Visibility edge'
-                              : 'Path width'}
-                          </span>
-                          <strong>{local.type === 'partial' ? distanceLabel(local.edgeDistanceKm, distanceUnit) : distanceLabel(local.pathWidthMeters / 1000, distanceUnit)}</strong>
+                          <span>Sun at maximum</span>
+                          <strong>{local.maximum ? local.maximum.altitude.toFixed(1) + '° · ' + Math.round(local.maximum.azimuth) + '° ' + compassDirection(local.maximum.azimuth) : '—'}</strong>
                         </div>
+                        <div><span>{local.type === 'partial' ? 'Partial phase' : local.type === 'total' ? 'Totality' : 'Annularity'}</span><strong>{formatDuration(local.type === 'partial' ? local.durationSeconds : local.centralDurationSeconds, true)}</strong></div>
+                      </div>
+
+                      <div className="field-tools">
+                        <button type="button" onClick={inspectHorizon} disabled={profileLoading || !local.maximum || localObservability === 'below'}>
+                          <Route size={16} aria-hidden="true" />
+                          {profileLoading ? 'Sampling terrain…' : localObservability === 'below' ? 'Sun below horizon' : 'Check the horizon'}
+                        </button>
+                        <button type="button" onClick={() => exportData('ics')}>
+                          <CalendarDays size={16} aria-hidden="true" /> Add to calendar
+                        </button>
+                        <button type="button" onClick={shareView}>
+                          <Share2 size={16} aria-hidden="true" /> Share this spot
+                        </button>
+                        <button type="button" onClick={() => window.print()}>
+                          <Printer size={16} aria-hidden="true" /> Print field card
+                        </button>
                       </div>
 
                       {liveCircumstances && (
@@ -1385,7 +1824,7 @@ export default function EclipseExplorer() {
                             />
                           </div>
                           <div>
-                            <span>At {formatTime(new Date(timeMs), displayZone).replace(/ [A-Z+].*$/, '')}</span>
+                            <span>At selected timeline time · {formatTime(new Date(timeMs), displayZone).replace(/ [A-Z+].*$/, '')}</span>
                             <strong>{percent(liveCircumstances.obscuration)} of the Sun covered</strong>
                             <small>{liveCircumstances.altitude.toFixed(1)}° high · {compassDirection(liveCircumstances.azimuth)} azimuth</small>
                           </div>
@@ -1398,8 +1837,8 @@ export default function EclipseExplorer() {
                           <small>{displayZone === 'UTC' ? 'Universal time' : displayZone.replaceAll('_', ' ')}</small>
                         </div>
                         <div className="segmented mini">
-                          <button className={timeMode === 'local' ? 'active' : ''} type="button" onClick={() => setTimeMode('local')}>Local</button>
-                          <button className={timeMode === 'utc' ? 'active' : ''} type="button" onClick={() => setTimeMode('utc')}>UTC</button>
+                          <button className={timeMode === 'local' ? 'active' : ''} type="button" aria-pressed={timeMode === 'local'} onClick={() => setTimeMode('local')}>Local</button>
+                          <button className={timeMode === 'utc' ? 'active' : ''} type="button" aria-pressed={timeMode === 'utc'} onClick={() => setTimeMode('utc')}>UTC</button>
                         </div>
                       </div>
                       <div className="contact-list">
@@ -1408,40 +1847,38 @@ export default function EclipseExplorer() {
                             type="button"
                             key={contact.key}
                             className={Math.abs(contact.date.getTime() - timeMs) < 30_000 ? 'contact-row active' : 'contact-row'}
-                            onClick={() => setTimeMs(contact.date.getTime())}
+                            aria-current={Math.abs(contact.date.getTime() - timeMs) < 30_000 ? 'time' : undefined}
+                            onClick={() => {
+                              setPlaying(false);
+                              setTimelineIntent('manual');
+                              setTimeMs(contact.date.getTime());
+                            }}
                           >
                             <span className="contact-code">{contact.shortLabel}</span>
                             <span className="contact-name">{contact.label}</span>
                             <span className="contact-sky">
                               <i className={contact.altitude < -0.8 ? 'below' : ''} />
-                              {contact.altitude.toFixed(0)}° {compassDirection(contact.azimuth)}
+                              {contact.altitude.toFixed(1)}° · {Math.round(contact.azimuth)}° {compassDirection(contact.azimuth)}
                             </span>
                             <strong>{formatTime(contact.date, displayZone).replace(/ [A-Z+].*$/, '')}</strong>
                           </button>
                         ))}
                       </div>
 
-                      <div className="field-tools">
-                        <button type="button" onClick={inspectHorizon} disabled={profileLoading || !local.maximum}>
-                          <Route size={16} aria-hidden="true" />
-                          {profileLoading ? 'Sampling terrain…' : 'Check the horizon'}
-                        </button>
-                        <button type="button" onClick={() => exportData('ics')}>
-                          <CalendarDays size={16} aria-hidden="true" /> Add to calendar
-                        </button>
-                        <button type="button" onClick={shareView}>
-                          <Share2 size={16} aria-hidden="true" /> Share this spot
-                        </button>
-                        <button type="button" onClick={() => window.print()}>
-                          <Printer size={16} aria-hidden="true" /> Print field card
-                        </button>
-                      </div>
-
                       {profile && <HorizonCard profile={profile} sunAltitude={local.maximum?.altitude ?? 0} />}
+
+                      <LocationComparison
+                        items={locationComparisons}
+                        selected={selected}
+                        bestKey={bestComparisonKey}
+                        timeMode={timeMode}
+                        onChoose={choosePlace}
+                      />
 
                       <details className="precision-details">
                         <summary>Planning details <ChevronDown size={15} aria-hidden="true" /></summary>
                         <dl>
+                          <div><dt>Magnitude</dt><dd>{local.magnitude.toFixed(4)}</dd></div>
                           {Number.isFinite(local.centerDistanceKm) && (
                             <div><dt>Center line</dt><dd>{distanceLabel(local.centerDistanceKm, distanceUnit)} {compassDirection(local.centerBearing)}</dd></div>
                           )}
@@ -1455,6 +1892,9 @@ export default function EclipseExplorer() {
                             </dt>
                             <dd>{distanceLabel(local.edgeDistanceKm, distanceUnit)}</dd>
                           </div>
+                          {local.type !== 'partial' && (
+                            <div><dt>Path width</dt><dd>{distanceLabel(local.pathWidthMeters / 1000, distanceUnit)}</dd></div>
+                          )}
                           <div><dt>Moon / Sun</dt><dd>{local.moonSunRatio.toFixed(4)}</dd></div>
                           <div>
                             <dt>Elevation</dt>
@@ -1465,13 +1905,7 @@ export default function EclipseExplorer() {
                                 max="9000"
                                 step="1"
                                 value={Math.round(selected.elevation)}
-                                onChange={(event) =>
-                                  setSelected((current) =>
-                                    current
-                                      ? { ...current, elevation: Number(event.target.value) || 0 }
-                                      : current,
-                                  )
-                                }
+                                onChange={(event) => updateSelectedElevation(Number(event.target.value) || 0)}
                                 aria-label="Observer elevation in metres"
                               />
                               <span>m</span>
@@ -1494,6 +1928,15 @@ export default function EclipseExplorer() {
                         </dl>
                       </details>
                     </>
+                  )}
+                  {local?.type === 'none' && (
+                    <LocationComparison
+                      items={locationComparisons}
+                      selected={selected}
+                      bestKey={bestComparisonKey}
+                      timeMode={timeMode}
+                      onChoose={choosePlace}
+                    />
                   )}
                 </section>
               )}
@@ -1522,6 +1965,42 @@ export default function EclipseExplorer() {
         </div>
       </aside>
 
+      {data && selected && local && (
+        <article className="print-field-card">
+          <header>
+            <span>Umbra field card</span>
+            <strong>{formatDateLabel(data.date)} · {TYPE_LABELS[data.type]} solar eclipse</strong>
+          </header>
+          <section>
+            <div>
+              <span>Observer</span>
+              <strong>{selected.name}</strong>
+              <small>{toDms(selected.lat, true)} · {toDms(selected.lon, false)} · {Math.round(selected.elevation)} m</small>
+            </div>
+            <div>
+              <span>Local result</span>
+              <strong>{typeSentence(local.type, localObservability)}</strong>
+              <small>{local.maximum ? percent(local.obscuration) + ' covered · maximum ' + formatTime(local.maximum.date, displayZone) : 'Outside the visibility area'}</small>
+            </div>
+          </section>
+          {!!local.contacts.length && (
+            <table>
+              <thead><tr><th>Contact</th><th>Time</th><th>Sun</th></tr></thead>
+              <tbody>
+                {local.contacts.map((contact) => (
+                  <tr key={contact.key}>
+                    <td>{contact.shortLabel} · {contact.label}</td>
+                    <td>{formatTime(contact.date, displayZone)}</td>
+                    <td>{contact.altitude.toFixed(1)}° · {Math.round(contact.azimuth)}° {compassDirection(contact.azimuth)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <footer>{safetySentence(local.type, localObservability)}</footer>
+        </article>
+      )}
+
       <div className="map-tools" aria-label="Map tools">
         <button
           className={drawer === 'layers' ? 'square-button active' : 'square-button'}
@@ -1535,7 +2014,8 @@ export default function EclipseExplorer() {
           className={tracking ? 'square-button active tracking' : 'square-button'}
           type="button"
           onClick={startLocationTracking}
-          aria-label={tracking ? 'Stop location tracking' : 'Use my location'}
+          aria-label={tracking ? 'Finding your location' : 'Use my location'}
+          disabled={tracking}
         >
           <LocateFixed size={19} aria-hidden="true" />
         </button>
@@ -1549,10 +2029,17 @@ export default function EclipseExplorer() {
         </button>
       </div>
 
-      <div className="map-legend" aria-label="Map legend">
-        <span><i className="legend-swatch path" />{data?.type === 'annular' ? 'Annularity' : data?.type === 'partial' ? 'Greatest eclipse' : 'Totality'}</span>
-        <span><i className="legend-swatch center" />Center line</span>
-        <span><i className="legend-swatch partial" />Partial visibility</span>
+      <div className="map-legend" aria-label="Visible map layers">
+        {layers.path && !!data?.geometry.umbra.length && (
+          <span><i className="legend-swatch path" />{data?.type === 'annular' ? 'Annularity' : 'Central path'}</span>
+        )}
+        {layers.center && !!data?.geometry.centralLine.length && (
+          <span><i className="legend-swatch center" />Center line</span>
+        )}
+        {layers.partial && !!data?.geometry.penumbra.length && (
+          <span><i className="legend-swatch partial" />Partial visibility</span>
+        )}
+        {layers.shadow && <span><i className="legend-swatch shadow" />Moving shadow</span>}
       </div>
 
       {data && (
@@ -1563,19 +2050,24 @@ export default function EclipseExplorer() {
           </button>
           <div className="timeline-now">
             <strong>{formatTime(new Date(timeMs || data.greatestTime), displayZone).replace(/ [A-Z+].*$/, '')}</strong>
-            <span>{displayZone === 'UTC' ? 'UTC' : displayZone.split('/').at(-1)?.replaceAll('_', ' ')}</span>
+            <span>{timelineStatus} · {displayZone === 'UTC' ? 'UTC' : displayZone.split('/').at(-1)?.replaceAll('_', ' ')}</span>
           </div>
           <div className="timeline-range">
             <input
               type="range"
               min={timelineBounds.start}
               max={timelineBounds.end}
+              step={60_000}
               value={Math.max(timelineBounds.start, Math.min(timelineBounds.end, timeMs || timelineBounds.start))}
               onChange={(event) => {
                 setPlaying(false);
+                setTimelineIntent('manual');
                 setTimeMs(Number(event.target.value));
               }}
               aria-label="Eclipse time"
+              aria-valuetext={
+                formatTime(new Date(timeMs || data.greatestTime), displayZone) + ', ' + timelineStatus.toLowerCase()
+              }
               style={{ '--timeline-progress': timelineProgress } as CSSProperties}
             />
             <div className="contact-markers" aria-hidden="true">
@@ -1588,10 +2080,32 @@ export default function EclipseExplorer() {
             </div>
             <div className="timeline-labels" aria-hidden="true">
               <span>{local?.contacts.find((contact) => contact.key === 'c1')?.shortLabel ?? 'Start'}</span>
-              <span>Maximum</span>
+              <span
+                className="maximum-label"
+                style={{ left: maximumTimelinePercent + '%' }}
+              >
+                Maximum
+              </span>
               <span>{local?.contacts.find((contact) => contact.key === 'c4')?.shortLabel ?? 'End'}</span>
             </div>
           </div>
+          <button
+            className="timeline-reset"
+            type="button"
+            onClick={() => {
+              setPlaying(false);
+              if (nowAvailable) {
+                setTimelineIntent('now');
+                setTimeMs(Date.now());
+              } else {
+                setTimelineIntent('auto');
+                setTimeMs(local?.maximum?.date.getTime() ?? data.greatestTime.getTime());
+              }
+            }}
+            aria-label={nowAvailable ? 'Jump to current time' : 'Jump to maximum eclipse'}
+          >
+            {nowAvailable ? 'Now' : 'Max'}
+          </button>
           <button className="timeline-time-mode" type="button" onClick={() => setTimeMode(timeMode === 'local' ? 'utc' : 'local')}>
             {timeMode === 'local' && selected ? 'Local' : 'UTC'}
           </button>
@@ -1616,11 +2130,19 @@ export default function EclipseExplorer() {
       {drawer && (
         <>
           <button className="drawer-scrim" type="button" onClick={() => setDrawer(null)} aria-label="Close panel" />
-          <aside className={'drawer drawer-' + drawer} aria-label={drawer === 'catalog' ? 'Eclipse catalog' : drawer === 'search' ? 'Place search' : drawer === 'layers' ? 'Map layers' : 'More tools'}>
+          <aside
+            ref={drawerRef}
+            className={'drawer drawer-' + drawer}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={'drawer-title-' + drawer}
+          >
             <div className="drawer-header">
               <div>
                 <span>{drawer === 'catalog' ? 'Five millennia' : drawer === 'search' ? 'Places' : drawer === 'layers' ? 'Map' : 'Umbra'}</span>
-                <h2>{drawer === 'catalog' ? 'Solar eclipse catalog' : drawer === 'search' ? 'Find a place' : drawer === 'layers' ? 'Layers & view' : 'Advanced & exports'}</h2>
+                <h2 id={'drawer-title-' + drawer} tabIndex={-1} data-drawer-heading>
+                  {drawer === 'catalog' ? 'Solar eclipse catalog' : drawer === 'search' ? 'Find a place' : drawer === 'layers' ? 'Layers & view' : 'Advanced & exports'}
+                </h2>
               </div>
               <button className="mini-icon" type="button" onClick={() => setDrawer(null)} aria-label="Close panel">
                 <X size={18} aria-hidden="true" />
@@ -1640,7 +2162,30 @@ export default function EclipseExplorer() {
                   />
                   {placeLoading && <span className="tiny-spinner" aria-label="Searching" />}
                 </form>
-                {placeError && <p className="inline-error">{placeError}</p>}
+                <details className="coordinate-search">
+                  <summary>Enter coordinates <ChevronDown size={15} aria-hidden="true" /></summary>
+                  <form onSubmit={submitCoordinates}>
+                    <label>
+                      <span>Latitude</span>
+                      <input name="latitude" type="number" min="-90" max="90" step="any" defaultValue={mapCenter.lat.toFixed(5)} required />
+                    </label>
+                    <label>
+                      <span>Longitude</span>
+                      <input name="longitude" type="number" min="-180" max="180" step="any" defaultValue={mapCenter.lon.toFixed(5)} required />
+                    </label>
+                    <button type="submit">Use coordinates</button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        choosePoint(mapCenter.lat, mapCenter.lon);
+                        setDrawer(null);
+                      }}
+                    >
+                      Use map center
+                    </button>
+                  </form>
+                </details>
+                {placeError && <p className="inline-error" role="alert">{placeError}</p>}
                 {!!placeResults.length && (
                   <div className="place-list">
                     <span className="list-label">Results</span>
@@ -1688,6 +2233,7 @@ export default function EclipseExplorer() {
                       type="button"
                       key={type}
                       className={typeFilters.includes(type) ? 'active' : ''}
+                      aria-pressed={typeFilters.includes(type)}
                       onClick={() =>
                         setTypeFilters((current) =>
                           current.includes(type) ? current.filter((item) => item !== type) : [...current, type],
@@ -1720,7 +2266,7 @@ export default function EclipseExplorer() {
                 <button className="catalog-search-button" type="button" onClick={runCatalogSearch} disabled={catalogLoading} data-catalog-search>
                   {catalogLoading ? 'Searching ' + Math.round(catalogProgress * 100) + '%' : 'Search eclipses'}
                 </button>
-                {catalogError && <p className="inline-error">{catalogError}</p>}
+                {catalogError && <p className="inline-error" role="alert">{catalogError}</p>}
                 {catalogSearched && (
                   <div className="catalog-results">
                     <div className="results-heading">
@@ -1780,7 +2326,7 @@ export default function EclipseExplorer() {
                   <span className="list-label">Base map</span>
                   <div className="base-map-grid">
                     {BASE_LABELS.map((item) => (
-                      <button className={baseMap === item.id ? 'active' : ''} type="button" key={item.id} onClick={() => setBaseMap(item.id)}>
+                      <button className={baseMap === item.id ? 'active' : ''} type="button" key={item.id} onClick={() => setBaseMap(item.id)} aria-pressed={baseMap === item.id}>
                         <span className={'base-preview preview-' + item.id} />
                         <strong>{item.label}</strong>
                         <small>{item.detail}</small>
@@ -1844,6 +2390,7 @@ export default function EclipseExplorer() {
                     </button>
                     <button type="button" onClick={() => window.print()}><Printer size={17} /><span>Field card</span></button>
                     <button type="button" onClick={() => exportData('ics')}><CalendarDays size={17} /><span>Calendar</span></button>
+                    <button type="button" onClick={enterPresentation}><Presentation size={17} /><span>Present map</span></button>
                   </div>
                 </section>
                 <section className="action-section">
@@ -1852,7 +2399,7 @@ export default function EclipseExplorer() {
                     <button type="button" onClick={() => exportData('geojson')}><FileDown size={16} /><span><strong>GeoJSON</strong><small>Map software & code</small></span></button>
                     <button type="button" onClick={() => exportData('kml')}><Globe2 size={16} /><span><strong>KML</strong><small>Google Earth</small></span></button>
                     <button type="button" onClick={() => exportData('kmz')}><Globe2 size={16} /><span><strong>KMZ</strong><small>Compressed Google Earth</small></span></button>
-                    <button type="button" onClick={() => exportData('gpx')}><Route size={16} /><span><strong>GPX</strong><small>GPS route</small></span></button>
+                    <button type="button" onClick={() => exportData('gpx')}><Route size={16} /><span><strong>GPX</strong><small>Center-line track</small></span></button>
                     <button type="button" onClick={() => exportData('csv')}><Download size={16} /><span><strong>Local CSV</strong><small>Contacts & sky angles</small></span></button>
                   </div>
                 </section>
@@ -1868,14 +2415,33 @@ export default function EclipseExplorer() {
                 )}
                 <section className="action-section settings-inline">
                   <span className="list-label">Preferences</span>
-                  <div className="preference-row"><span>Distance</span><div className="segmented"><button type="button" className={distanceUnit === 'metric' ? 'active' : ''} onClick={() => setDistanceUnit('metric')}>km</button><button type="button" className={distanceUnit === 'imperial' ? 'active' : ''} onClick={() => setDistanceUnit('imperial')}>mi</button></div></div>
-                  <div className="preference-row"><span>Clock</span><div className="segmented"><button type="button" className={timeMode === 'local' ? 'active' : ''} onClick={() => setTimeMode('local')}>Local</button><button type="button" className={timeMode === 'utc' ? 'active' : ''} onClick={() => setTimeMode('utc')}>UTC</button></div></div>
+                  <div className="preference-row"><span>Distance</span><div className="segmented"><button type="button" className={distanceUnit === 'metric' ? 'active' : ''} aria-pressed={distanceUnit === 'metric'} onClick={() => setDistanceUnit('metric')}>km</button><button type="button" className={distanceUnit === 'imperial' ? 'active' : ''} aria-pressed={distanceUnit === 'imperial'} onClick={() => setDistanceUnit('imperial')}>mi</button></div></div>
+                  <div className="preference-row"><span>Clock</span><div className="segmented"><button type="button" className={timeMode === 'local' ? 'active' : ''} aria-pressed={timeMode === 'local'} onClick={() => setTimeMode('local')}>Local</button><button type="button" className={timeMode === 'utc' ? 'active' : ''} aria-pressed={timeMode === 'utc'} onClick={() => setTimeMode('utc')}>UTC</button></div></div>
                 </section>
+                <details className="about-details map-summary-details">
+                  <summary><Accessibility size={16} /> Text map summary <ChevronDown size={15} /></summary>
+                  <div>
+                    <p>{mapSummary}</p>
+                    <p>
+                      Active layers: {[
+                        layers.partial && 'partial visibility',
+                        layers.path && 'central path',
+                        layers.center && 'center line',
+                        layers.shadow && 'moving shadow',
+                        layers.night && 'day and twilight',
+                        layers.magnitude && 'magnitude contours',
+                        layers.timeContours && 'maximum-time contours',
+                      ].filter(Boolean).join(', ') || 'base map only'}.
+                    </p>
+                  </div>
+                </details>
                 <details className="about-details">
                   <summary><Info size={16} /> About the calculations <ChevronDown size={15} /></summary>
                   <div>
-                    <p>Predictions use Besselian elements from the Five Millennium Canon of Solar Eclipses. Times are calculated for your coordinates and elevation.</p>
-                    <p>Small differences are expected from atmospheric refraction, terrain, ΔT, and the Moon’s irregular limb. Always verify critical plans with an official source.</p>
+                    <p>Predictions use Besselian elements from NASA’s Five Millennium Canon and astronomy-bundle 9.38.0. Coordinates use WGS84; times can be shown in UTC or the selected IANA time zone.</p>
+                    <p>Map paths are sampled about every 20 seconds. Analysis contours use a 2° grid and 30-minute time intervals. Horizon checks sample terrain in 96 directions; they do not include buildings or vegetation.</p>
+                    <p>Magnitude measures the fraction of the Sun’s diameter covered; obscuration measures its area. C1/C4 mark the partial phase, and C2/C3 bound totality or annularity. Umbra is the central shadow; penumbra is the partial shadow.</p>
+                    <p>Small differences are expected from atmospheric refraction, terrain, ΔT, and the Moon’s irregular limb. Verify critical plans with an official source.</p>
                     <p className="safety-note"><Sun size={16} /> Use certified eclipse glasses whenever any bright part of the Sun is visible. Ordinary sunglasses are not safe.</p>
                     <div className="source-links">
                       <a href="https://eclipse.gsfc.nasa.gov/SEcat5/SEcatalog.html" target="_blank" rel="noreferrer">NASA eclipse catalog <ExternalLink size={13} /></a>
@@ -1899,6 +2465,77 @@ export default function EclipseExplorer() {
       )}
       <div className={toast ? 'toast visible' : 'toast'} role="status" aria-live="polite">{toast}</div>
     </main>
+  );
+}
+
+function LocationComparison({
+  items,
+  selected,
+  bestKey,
+  timeMode,
+  onChoose,
+}: {
+  items: LocationComparisonItem[];
+  selected: SelectedLocation;
+  bestKey?: string;
+  timeMode: TimeMode;
+  onChoose: (place: SelectedLocation) => void;
+}) {
+  if (items.length < 2) return null;
+  return (
+    <details className="place-comparison">
+      <summary>
+        Compare {items.length} locations
+        <ChevronDown size={15} aria-hidden="true" />
+      </summary>
+      <div className="comparison-list">
+        {items.map((item) => {
+          const itemObservability = observability(item.result);
+          const itemZone = timeMode === 'local' ? item.zone : 'UTC';
+          const isActive = locationKey(selected) === item.key;
+          return (
+            <button
+              type="button"
+              className={
+                'comparison-card' +
+                (isActive ? ' active' : '') +
+                (item.key === bestKey ? ' highest-coverage' : '')
+              }
+              key={item.key}
+              onClick={() => onChoose(item.place)}
+              aria-current={isActive ? 'location' : undefined}
+            >
+              <span className="comparison-place">
+                <strong>{item.place.name}</strong>
+                <small>{typeSentence(item.result.type, itemObservability)}</small>
+              </span>
+              {item.key === bestKey && <span className="comparison-badge">Highest coverage</span>}
+              <span className="comparison-metric">
+                <small>Covered</small>
+                <strong>{item.result.type === 'none' ? '—' : percent(item.result.obscuration)}</strong>
+              </span>
+              <span className="comparison-metric">
+                <small>Maximum</small>
+                <strong>
+                  {item.result.maximum
+                    ? formatTime(item.result.maximum.date, itemZone).replace(/ [A-Z+].*$/, '')
+                    : '—'}
+                </strong>
+              </span>
+              <span className="comparison-metric">
+                <small>Sun</small>
+                <strong>
+                  {item.result.maximum
+                    ? item.result.maximum.altitude.toFixed(1) + '° ' +
+                      compassDirection(item.result.maximum.azimuth)
+                    : '—'}
+                </strong>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </details>
   );
 }
 
