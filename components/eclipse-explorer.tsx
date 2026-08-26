@@ -53,6 +53,7 @@ import {
   formatDuration,
   formatTime,
   getAdjacentEclipseDate,
+  getNextSolarEclipseDate,
   loadEclipse,
   parseEclipseDate,
   relativeDateLabel,
@@ -91,7 +92,7 @@ import {
   type PlaceResult,
 } from '@/lib/services';
 
-const DEFAULT_DATE = '2027-02-06';
+const DEFAULT_DATE = getNextSolarEclipseDate() ?? '2027-02-06';
 const DEFAULT_LAYERS: LayerVisibility = {
   path: true,
   center: true,
@@ -1571,6 +1572,7 @@ export default function EclipseExplorer() {
 
   const eventColor = data ? colorForType(data.type) : '#D9516E';
   const eventStyle = { '--event-color': eventColor } as CSSProperties;
+  const isNextEclipse = data?.date === DEFAULT_DATE;
 
   return (
     <main
@@ -1675,11 +1677,27 @@ export default function EclipseExplorer() {
               <section className="event-intro">
                 <div className="eyebrow-row">
                   <span className="type-dot" />
-                  <span>{data ? formatDateLabel(data.date) : 'Loading eclipse'}</span>
+                  <span>
+                    {data
+                      ? isNextEclipse
+                        ? 'Next solar eclipse'
+                        : 'Solar eclipse atlas'
+                      : 'Loading eclipse'}
+                  </span>
                   {data && <span className="relative-date">{relativeDateLabel(data.date)}</span>}
                 </div>
                 <h1>{data ? TYPE_LABELS[data.type] + ' solar eclipse' : 'Tracing the Moon’s shadow…'}</h1>
-                <p>{data ? eventRegion(data.date, data.greatest) : 'Loading calculations and path geometry.'}</p>
+                {data ? (
+                  <div className="event-context">
+                    <time dateTime={data.date}>{formatDateLabel(data.date)}</time>
+                    <p>
+                      <span>{data.type === 'partial' ? 'Best visibility' : 'Map follows the shadow'}</span>
+                      <strong>{eventRegion(data.date, data.greatest)}</strong>
+                    </p>
+                  </div>
+                ) : (
+                  <p className="event-loading-copy">Loading calculations and path geometry.</p>
+                )}
               </section>
 
               {!selected ? (
@@ -1687,12 +1705,12 @@ export default function EclipseExplorer() {
                   <div>
                     <MapPin size={18} aria-hidden="true" />
                     <div>
-                      <strong>Check visibility at a location</strong>
-                      <span>Tap the map, search, or use your current location.</span>
+                      <strong>Will you see it?</strong>
+                      <span>Check coverage, local times and the Sun’s position.</span>
                     </div>
                   </div>
                   <div className="choose-actions">
-                    <button type="button" onClick={() => setDrawer('search')}>Search a place</button>
+                    <button type="button" onClick={() => setDrawer('search')}>Search place</button>
                     <button type="button" onClick={startLocationTracking} disabled={tracking}>
                       <LocateFixed size={15} aria-hidden="true" /> {tracking ? 'Finding…' : 'Use my location'}
                     </button>

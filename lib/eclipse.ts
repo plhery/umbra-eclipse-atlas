@@ -134,6 +134,17 @@ export function eventTitle(type: EclipseKind, date: string) {
   return names[type];
 }
 
+export function getNextSolarEclipseDate(now = new Date()) {
+  const year = now.getUTCFullYear();
+  if (year < 1900 || year > 2100) return null;
+  const month = String(now.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(now.getUTCDate()).padStart(2, '0');
+  return StandardCatalogue.getAvailableEclipseDates(
+    `${year}-${month}-${day}`,
+    '2100-12-31',
+  )[0] ?? null;
+}
+
 export async function catalogueForDate(date: string) {
   const year = parseEclipseDate(date).year;
   if (year >= 1900 && year <= 2100) return StandardCatalogue;
