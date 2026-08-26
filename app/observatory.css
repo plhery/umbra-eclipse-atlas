@@ -1333,6 +1333,10 @@ button.comparison-row:hover,
     --mobile-sheet: 302px;
   }
 
+  .atlas-app.has-selection.sheet-peek {
+    --mobile-sheet: 218px;
+  }
+
   .atlas-app.sheet-mid {
     --mobile-sheet: 62dvh;
   }
@@ -1402,6 +1406,11 @@ button.comparison-row:hover,
     height: var(--mobile-sheet);
   }
 
+  .sheet-dragging .event-panel,
+  .sheet-dragging .timeline-dock {
+    transition: none;
+  }
+
   .drawer {
     top: 62px;
     height: auto;
@@ -1455,6 +1464,18 @@ button.comparison-row:hover,
 
   .sheet-grabber span {
     background: var(--line-strong);
+    transition: width 140ms ease, background 140ms ease;
+  }
+
+  .sheet-grabber {
+    cursor: ns-resize;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .sheet-dragging .sheet-grabber span {
+    width: 42px;
+    background: var(--ink);
   }
 
   .event-nav {
@@ -1518,6 +1539,15 @@ button.comparison-row:hover,
   .sheet-peek .local-section {
     margin-top: 12px;
     margin-bottom: 0;
+  }
+
+  .has-selection.sheet-peek .event-nav,
+  .has-selection.sheet-peek .event-intro {
+    display: none;
+  }
+
+  .has-selection.sheet-peek .local-section {
+    margin-top: 30px;
   }
 
   .sheet-peek .local-section > *:not(.location-heading):not(.visibility-verdict) {

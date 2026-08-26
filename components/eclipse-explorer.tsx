@@ -8,6 +8,7 @@ import {
   useState,
   type CSSProperties,
   type FormEvent,
+  type PointerEvent as ReactPointerEvent,
 } from 'react';
 import {
   Accessibility,
@@ -344,6 +345,14 @@ export default function EclipseExplorer() {
   const lastCursorUpdateRef = useRef(0);
   const playbackTimeRef = useRef(0);
   const selectionRequestRef = useRef(0);
+  const sheetDragRef = useRef<{
+    pointerId: number;
+    startY: number;
+    startHeight: number;
+    moved: boolean;
+  } | null>(null);
+  const sheetDragCleanupRef = useRef<(() => void) | null>(null);
+  const lastSheetDragAtRef = useRef(0);
 
   const [eventDate, setEventDate] = useState(DEFAULT_DATE);
   const [data, setData] = useState<EclipseData | null>(null);
@@ -353,6 +362,7 @@ export default function EclipseExplorer() {
   const [selected, setSelected] = useState<SelectedLocation | null>(null);
   const [drawer, setDrawer] = useState<Drawer>(null);
   const [sheetSnap, setSheetSnap] = useState<SheetSnap>('peek');
+  const [sheetDragHeight, setSheetDragHeight] = useState<number | null>(null);
   const [baseMap, setBaseMap] = useState<BaseMap>('street');
   const [layers, setLayers] = useState<LayerVisibility>(DEFAULT_LAYERS);
   const [nightOpacity, setNightOpacity] = useState(0.62);
@@ -389,6 +399,8 @@ export default function EclipseExplorer() {
   useEffect(() => {
     playbackTimeRef.current = timeMs;
   }, [timeMs]);
+
+  useEffect(() => () => sheetDragCleanupRef.current?.(), []);
 
   const [placeQuery, setPlaceQuery] = useState('');
   const [placeResults, setPlaceResults] = useState<PlaceResult[]>([]);
@@ -574,10 +586,13 @@ export default function EclipseExplorer() {
       setTimezoneOverride('');
       setProfile(null);
       setElevationStatus(elevation === undefined ? 'loading' : 'provided');
-      setSheetSnap('mid');
+      setSheetSnap('peek');
+      eventPanelScrollRef.current?.scrollTo({ top: 0 });
+      const mobile = window.innerWidth <= 760;
       mapRef.current?.easeTo({
         center: [provisional.lon, provisional.lat],
         zoom: Math.max(mapRef.current.getZoom(), 6),
+        offset: mobile ? [0, -114] : [0, 0],
         duration: 650,
       });
 
@@ -1564,6 +1579,66 @@ export default function EclipseExplorer() {
     setSheetSnap(next);
   };
 
+  const startSheetDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (window.innerWidth > 760 || !event.isPrimary || event.button !== 0) return;
+    const panel = event.currentTarget.closest<HTMLElement>('.event-panel');
+    if (!panel) return;
+    sheetDragCleanupRef.current?.();
+    const drag = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      startHeight: panel.getBoundingClientRect().height,
+      moved: false,
+    };
+    sheetDragRef.current = drag;
+
+    const move = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== drag.pointerId) return;
+      if (moveEvent.cancelable) moveEvent.preventDefault();
+      const delta = drag.startY - moveEvent.clientY;
+      if (Math.abs(delta) > 6) drag.moved = true;
+      const minimum = selected ? 218 : window.innerWidth <= 390 ? 306 : 302;
+      const maximum = Math.max(minimum, window.innerHeight - 62);
+      setSheetDragHeight(Math.max(minimum, Math.min(maximum, drag.startHeight + delta)));
+    };
+
+    const cleanup = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', cancel);
+      sheetDragCleanupRef.current = null;
+    };
+
+    const finish = (finishEvent: PointerEvent, cancelled = false) => {
+      if (finishEvent.pointerId !== drag.pointerId) return;
+      cleanup();
+      sheetDragRef.current = null;
+      if (!cancelled && drag.moved) {
+        const delta = drag.startY - finishEvent.clientY;
+        const order: SheetSnap[] = ['peek', 'mid', 'full'];
+        const current = order.indexOf(sheetSnap);
+        const direction = Math.abs(delta) >= 32 ? (delta > 0 ? 1 : -1) : 0;
+        const next = Math.max(0, Math.min(order.length - 1, current + direction));
+        if (order[next] === 'peek') eventPanelScrollRef.current?.scrollTo({ top: 0 });
+        setSheetSnap(order[next]);
+        lastSheetDragAtRef.current = performance.now();
+      }
+      setSheetDragHeight(null);
+    };
+
+    const cancel = (cancelEvent: PointerEvent) => finish(cancelEvent, true);
+    sheetDragCleanupRef.current = cleanup;
+    window.addEventListener('pointermove', move, { passive: false });
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', cancel);
+    setSheetDragHeight(drag.startHeight);
+  };
+
+  const handleSheetClick = () => {
+    if (performance.now() - lastSheetDragAtRef.current < 400) return;
+    cycleSheet();
+  };
+
   const currentIsSaved =
     !!selected &&
     savedPlaces.some(
@@ -1571,12 +1646,20 @@ export default function EclipseExplorer() {
     );
 
   const eventColor = data ? colorForType(data.type) : '#D9516E';
-  const eventStyle = { '--event-color': eventColor } as CSSProperties;
+  const eventStyle = {
+    '--event-color': eventColor,
+    ...(sheetDragHeight === null ? {} : { '--mobile-sheet': `${sheetDragHeight}px` }),
+  } as CSSProperties;
   const isNextEclipse = data?.date === DEFAULT_DATE;
 
   return (
     <main
-      className={'atlas-app sheet-' + sheetSnap + (presentationMode ? ' presentation-mode' : '')}
+      className={
+        'atlas-app sheet-' + sheetSnap +
+        (selected ? ' has-selection' : '') +
+        (sheetDragHeight === null ? '' : ' sheet-dragging') +
+        (presentationMode ? ' presentation-mode' : '')
+      }
       style={eventStyle}
     >
       <a className="skip-link" href="#eclipse-details">Skip interactive map</a>
@@ -1648,7 +1731,14 @@ export default function EclipseExplorer() {
       )}
 
       <aside id="eclipse-details" className="event-panel" aria-label="Eclipse details">
-        <button className="sheet-grabber" type="button" onClick={cycleSheet} aria-label="Resize details panel">
+        <button
+          className="sheet-grabber"
+          type="button"
+          onClick={handleSheetClick}
+          onPointerDown={startSheetDrag}
+          aria-label="Drag or tap to resize details panel"
+          aria-expanded={sheetSnap !== 'peek'}
+        >
           <span />
         </button>
         <div ref={eventPanelScrollRef} className="event-panel-scroll">
