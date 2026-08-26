@@ -1,15 +1,24 @@
 import type { Metadata } from 'next';
-import { Geist, Geist_Mono } from 'next/font/google';
+import { Barlow_Condensed, IBM_Plex_Mono, IBM_Plex_Sans } from 'next/font/google';
 import './globals.css';
+import './observatory.css';
 
-const geistSans = Geist({
+const plexSans = IBM_Plex_Sans({
   variable: '--font-geist-sans',
   subsets: ['latin'],
+  weight: ['400', '500', '600'],
 });
 
-const geistMono = Geist_Mono({
+const plexMono = IBM_Plex_Mono({
   variable: '--font-geist-mono',
   subsets: ['latin'],
+  weight: ['400', '500', '600'],
+});
+
+const barlowCondensed = Barlow_Condensed({
+  variable: '--font-observatory-display',
+  subsets: ['latin'],
+  weight: ['500', '600', '700'],
 });
 
 export const metadata: Metadata = {
@@ -26,14 +35,14 @@ export const metadata: Metadata = {
     title: 'Umbra — Solar eclipse atlas',
     description:
       'Every solar eclipse, mapped with local times, visibility, terrain, and field-ready exports.',
-    images: [{ url: '/og.png', width: 1731, height: 909, alt: 'Umbra solar eclipse atlas' }],
+    images: [{ url: '/og-v2.png', width: 1731, height: 909, alt: 'Umbra solar eclipse atlas' }],
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
     title: 'Umbra — Solar eclipse atlas',
     description: 'Follow the Moon’s shadow and see what happens at your location.',
-    images: ['/og.png'],
+    images: ['/og-v2.png'],
   },
 };
 
@@ -45,7 +54,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+        className={`${plexSans.variable} ${plexMono.variable} ${barlowCondensed.variable} antialiased`}
       >
         {children}
       </body>

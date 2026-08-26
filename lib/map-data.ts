@@ -70,12 +70,23 @@ export const BASE_STYLE: StyleSpecification = {
     },
   },
   layers: [
-    { id: 'base-street', type: 'raster', source: 'street' },
+    {
+      id: 'base-street',
+      type: 'raster',
+      source: 'street',
+      paint: {
+        'raster-saturation': -0.68,
+        'raster-contrast': -0.06,
+        'raster-brightness-min': 0.08,
+        'raster-brightness-max': 0.94,
+      },
+    },
     {
       id: 'base-terrain',
       type: 'raster',
       source: 'terrain',
       layout: { visibility: 'none' },
+      paint: { 'raster-saturation': -0.42, 'raster-contrast': -0.04 },
     },
     {
       id: 'base-satellite',
@@ -128,17 +139,17 @@ export function installEclipseLayers(map: MapLibreMap) {
     id: 'penumbra-fill',
     type: 'fill',
     source: 'penumbra',
-    paint: { 'fill-color': '#237A57', 'fill-opacity': 0.08 },
+    paint: { 'fill-color': '#536D74', 'fill-opacity': 0.025 },
   });
   map.addLayer({
     id: 'penumbra-line',
     type: 'line',
     source: 'penumbra',
     paint: {
-      'line-color': '#237A57',
+      'line-color': '#536D74',
       'line-width': 1.2,
       'line-dasharray': [3, 2],
-      'line-opacity': 0.8,
+      'line-opacity': 0.72,
     },
   });
   map.addLayer({
@@ -183,22 +194,23 @@ export function installEclipseLayers(map: MapLibreMap) {
     id: 'umbra-fill',
     type: 'fill',
     source: 'umbra',
-    paint: { 'fill-color': '#D9516E', 'fill-opacity': 0.22 },
+    paint: { 'fill-color': '#DB4A35', 'fill-opacity': 0.17 },
   });
   map.addLayer({
     id: 'umbra-limits',
     type: 'line',
     source: 'umbra',
-    paint: { 'line-color': '#D9516E', 'line-width': 2 },
+    paint: { 'line-color': '#DB4A35', 'line-width': 1.8 },
   });
   map.addLayer({
     id: 'horizon-lines',
     type: 'line',
     source: 'horizons',
     paint: {
-      'line-color': ['get', 'color'],
-      'line-width': 1.5,
+      'line-color': '#536D74',
+      'line-width': 1.2,
       'line-dasharray': [2, 2],
+      'line-opacity': 0.62,
     },
   });
   map.addLayer({
@@ -206,10 +218,10 @@ export function installEclipseLayers(map: MapLibreMap) {
     type: 'line',
     source: 'time-guides',
     paint: {
-      'line-color': '#6E56CF',
-      'line-width': 1.1,
+      'line-color': '#536D74',
+      'line-width': 1,
       'line-dasharray': [1, 1.5],
-      'line-opacity': 0.85,
+      'line-opacity': 0.58,
     },
   });
   map.addLayer({
@@ -217,7 +229,7 @@ export function installEclipseLayers(map: MapLibreMap) {
     type: 'line',
     source: 'magnitude-contours',
     paint: {
-      'line-color': '#237A57',
+      'line-color': '#334E58',
       'line-width': 1.1,
       'line-dasharray': [3, 1.5],
       'line-opacity': 0.82,
@@ -228,7 +240,7 @@ export function installEclipseLayers(map: MapLibreMap) {
     type: 'line',
     source: 'time-contours',
     paint: {
-      'line-color': '#6E56CF',
+      'line-color': '#536D74',
       'line-width': 1,
       'line-dasharray': [1, 1.5],
       'line-opacity': 0.82,
@@ -249,26 +261,26 @@ export function installEclipseLayers(map: MapLibreMap) {
     id: 'centerline-line',
     type: 'line',
     source: 'centerline',
-    paint: { 'line-color': '#2F68D8', 'line-width': 2.3 },
+    paint: { 'line-color': '#A83226', 'line-width': 2.2 },
   });
   map.addLayer({
     id: 'shadow-fill',
     type: 'fill',
     source: 'shadow',
-    paint: { 'fill-color': '#17201d', 'fill-opacity': 0.5 },
+    paint: { 'fill-color': '#102630', 'fill-opacity': 0.46 },
   });
   map.addLayer({
     id: 'shadow-line',
     type: 'line',
     source: 'shadow',
-    paint: { 'line-color': '#D9516E', 'line-width': 2.5 },
+    paint: { 'line-color': '#DB4A35', 'line-width': 2.2 },
   });
   map.addLayer({
     id: 'profile-line-layer',
     type: 'line',
     source: 'profile-line',
     paint: {
-      'line-color': '#B67A12',
+      'line-color': '#1F6591',
       'line-width': 2,
       'line-dasharray': [2, 1],
     },
@@ -278,9 +290,9 @@ export function installEclipseLayers(map: MapLibreMap) {
     type: 'fill',
     source: 'accuracy',
     paint: {
-      'fill-color': '#2F68D8',
+      'fill-color': '#1F6591',
       'fill-opacity': 0.1,
-      'fill-outline-color': '#2F68D8',
+      'fill-outline-color': '#1F6591',
     },
   });
   map.addLayer({
@@ -289,8 +301,8 @@ export function installEclipseLayers(map: MapLibreMap) {
     source: 'greatest',
     paint: {
       'circle-radius': 5,
-      'circle-color': '#FFFDF8',
-      'circle-stroke-color': '#18211D',
+      'circle-color': '#F8FBFC',
+      'circle-stroke-color': '#102630',
       'circle-stroke-width': 2,
     },
   });
@@ -298,7 +310,7 @@ export function installEclipseLayers(map: MapLibreMap) {
     id: 'selected-point-halo',
     type: 'circle',
     source: 'selected-location',
-    paint: { 'circle-radius': 11, 'circle-color': '#FFFDF8', 'circle-opacity': 0.85 },
+    paint: { 'circle-radius': 11, 'circle-color': '#F8FBFC', 'circle-opacity': 0.88 },
   });
   map.addLayer({
     id: 'selected-point',
@@ -306,8 +318,8 @@ export function installEclipseLayers(map: MapLibreMap) {
     source: 'selected-location',
     paint: {
       'circle-radius': 6,
-      'circle-color': '#18211D',
-      'circle-stroke-color': '#FFFDF8',
+      'circle-color': '#1F6591',
+      'circle-stroke-color': '#F8FBFC',
       'circle-stroke-width': 2,
     },
   });
@@ -408,6 +420,7 @@ export function updateEclipseGeometry(map: MapLibreMap, data: EclipseData) {
   const pathColor = colorForType(data.type);
   map.setPaintProperty('umbra-fill', 'fill-color', pathColor);
   map.setPaintProperty('umbra-limits', 'line-color', pathColor);
+  map.setPaintProperty('centerline-line', 'line-color', pathColor);
   map.setPaintProperty('shadow-line', 'line-color', pathColor);
 }
 
@@ -745,10 +758,8 @@ export function fitEclipse(map: MapLibreMap, data: EclipseData, panelWidth = 0) 
 }
 
 export function colorForType(type: EclipseKind) {
-  if (type === 'annular') return '#B67A12';
-  if (type === 'hybrid') return '#6E56CF';
-  if (type === 'partial') return '#237A57';
-  return '#D9516E';
+  void type;
+  return '#DB4A35';
 }
 
 export function comparisonColor(index: number) {

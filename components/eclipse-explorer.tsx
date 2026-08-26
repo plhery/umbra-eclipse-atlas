@@ -46,7 +46,6 @@ import {
   compassDirection,
   computeLocalResult,
   eventRegion,
-  eventTitle,
   formatCoordinate,
   formatDateLabel,
   formatDuration,
@@ -94,14 +93,46 @@ const DEFAULT_LAYERS: LayerVisibility = {
   path: true,
   center: true,
   partial: true,
-  horizons: true,
-  guides: true,
+  horizons: false,
+  guides: false,
   magnitude: false,
   timeContours: false,
   night: false,
   shadow: true,
   lightPollution: false,
 };
+type LayerPreset = 'simple' | 'plan' | 'explain' | 'analyze';
+const LAYER_PRESETS: Record<LayerPreset, LayerVisibility> = {
+  simple: { ...DEFAULT_LAYERS },
+  plan: {
+    ...DEFAULT_LAYERS,
+    horizons: true,
+    guides: true,
+  },
+  explain: {
+    ...DEFAULT_LAYERS,
+    guides: true,
+    night: true,
+  },
+  analyze: {
+    ...DEFAULT_LAYERS,
+    horizons: true,
+    guides: true,
+    magnitude: true,
+    timeContours: true,
+    shadow: false,
+  },
+};
+const LAYER_PRESET_LABELS: Array<{
+  id: LayerPreset;
+  label: string;
+  detail: string;
+}> = [
+  { id: 'simple', label: 'Simple', detail: 'Path and moving shadow' },
+  { id: 'plan', label: 'Plan', detail: 'Horizons and time ticks' },
+  { id: 'explain', label: 'Explain', detail: 'Shadow, daylight and timing' },
+  { id: 'analyze', label: 'Analyze', detail: 'Contours and geometry' },
+];
 const ALL_TYPES: EclipseKind[] = ['total', 'annular', 'hybrid', 'partial'];
 const TYPE_LABELS: Record<EclipseKind, string> = {
   total: 'Total',
@@ -221,10 +252,10 @@ function distanceLabel(km: number, unit: DistanceUnit) {
 }
 
 function typeSentence(type: string) {
-  if (type === 'total') return 'You can see totality here';
-  if (type === 'annular') return 'You can see the ring of fire here';
-  if (type === 'partial') return 'A partial eclipse is visible here';
-  return 'This eclipse is not visible here';
+  if (type === 'total') return 'Total eclipse at this location';
+  if (type === 'annular') return 'Annular eclipse at this location';
+  if (type === 'partial') return 'Partial eclipse at this location';
+  return 'Not visible at this location';
 }
 
 function typeDetail(type: string) {
@@ -242,6 +273,7 @@ function compareEclipseDates(a: string, b: string) {
 
 export default function EclipseExplorer() {
   const mapContainerRef = useRef<HTMLDivElement>(null);
+  const eventPanelScrollRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const choosePointRef = useRef<
     (lat: number, lon: number, name?: string, accuracy?: number, elevation?: number) => void
@@ -1172,8 +1204,20 @@ export default function EclipseExplorer() {
     setLayers((current) => ({ ...current, [key]: value }));
   };
 
+  const applyLayerPreset = (preset: LayerPreset) => {
+    setLayers({ ...LAYER_PRESETS[preset] });
+  };
+
+  const activeLayerPreset = LAYER_PRESET_LABELS.find(({ id }) =>
+    (Object.keys(LAYER_PRESETS[id]) as Array<keyof LayerVisibility>).every(
+      (key) => LAYER_PRESETS[id][key] === layers[key],
+    ),
+  )?.id;
+
   const cycleSheet = () => {
-    setSheetSnap((current) => (current === 'peek' ? 'mid' : current === 'mid' ? 'full' : 'peek'));
+    const next = sheetSnap === 'peek' ? 'mid' : sheetSnap === 'mid' ? 'full' : 'peek';
+    if (next === 'peek') eventPanelScrollRef.current?.scrollTo({ top: 0 });
+    setSheetSnap(next);
   };
 
   const currentIsSaved =
@@ -1201,7 +1245,7 @@ export default function EclipseExplorer() {
         </button>
         <button className="place-search-trigger" type="button" onClick={() => setDrawer('search')}>
           <Search size={17} aria-hidden="true" />
-          <span>{selected ? selected.name : 'Find a place'}</span>
+          <span>{selected ? selected.name : 'Search a place'}</span>
           <kbd>⌘ K</kbd>
         </button>
         <div className="topbar-actions">
@@ -1224,7 +1268,7 @@ export default function EclipseExplorer() {
         <button className="sheet-grabber" type="button" onClick={cycleSheet} aria-label="Resize details panel">
           <span />
         </button>
-        <div className="event-panel-scroll">
+        <div ref={eventPanelScrollRef} className="event-panel-scroll">
           <div className="event-nav">
             <button type="button" onClick={() => stepEvent(-1)} aria-label="Previous eclipse">
               <ChevronLeft size={17} aria-hidden="true" />
@@ -1250,46 +1294,26 @@ export default function EclipseExplorer() {
               <section className="event-intro">
                 <div className="eyebrow-row">
                   <span className="type-dot" />
-                  <span>{data ? TYPE_LABELS[data.type] + ' solar eclipse' : 'Loading eclipse'}</span>
+                  <span>{data ? formatDateLabel(data.date) : 'Loading eclipse'}</span>
                   {data && <span className="relative-date">{relativeDateLabel(data.date)}</span>}
                 </div>
-                <h1>{data ? eventTitle(data.type, data.date) : 'Tracing the Moon’s shadow…'}</h1>
-                <p>{data ? formatDateLabel(data.date) + ' · ' + eventRegion(data.date, data.greatest) : 'Loading calculations and path geometry.'}</p>
+                <h1>{data ? TYPE_LABELS[data.type] + ' solar eclipse' : 'Tracing the Moon’s shadow…'}</h1>
+                <p>{data ? eventRegion(data.date, data.greatest) : 'Loading calculations and path geometry.'}</p>
               </section>
-
-              {data && (
-                <div className="event-summary" aria-label="Global eclipse summary">
-                  <div>
-                    <span>Greatest</span>
-                    <strong>{formatTime(data.greatestTime, 'UTC').replace(' UTC', '')}</strong>
-                    <small>UTC</small>
-                  </div>
-                  <div>
-                    <span>Magnitude</span>
-                    <strong>{data.magnitude.toFixed(3)}</strong>
-                    <small>{percent(data.obscuration)} obscured</small>
-                  </div>
-                  <div>
-                    <span>{data.type === 'partial' ? 'Saros series' : data.type === 'annular' ? 'Annularity' : 'Totality'}</span>
-                    <strong>{data.type === 'partial' ? data.saros : formatDuration(data.centralDurationSeconds, true)}</strong>
-                    <small>{data.type === 'partial' ? 'Global partial eclipse' : 'Saros ' + data.saros}</small>
-                  </div>
-                </div>
-              )}
 
               {!selected ? (
                 <section className="choose-location-card">
                   <div>
                     <MapPin size={18} aria-hidden="true" />
                     <div>
-                      <strong>Will I see it here?</strong>
-                      <span>Tap the map, search, or use your location.</span>
+                      <strong>Check visibility at a location</strong>
+                      <span>Tap the map, search, or use your current location.</span>
                     </div>
                   </div>
                   <div className="choose-actions">
-                    <button type="button" onClick={() => setDrawer('search')}>Find a place</button>
+                    <button type="button" onClick={() => setDrawer('search')}>Search a place</button>
                     <button type="button" onClick={startLocationTracking}>
-                      <LocateFixed size={15} aria-hidden="true" /> Locate me
+                      <LocateFixed size={15} aria-hidden="true" /> Use my location
                     </button>
                   </div>
                 </section>
@@ -1297,7 +1321,7 @@ export default function EclipseExplorer() {
                 <section className="local-section">
                   <div className="location-heading">
                     <div>
-                      <span>Your spot</span>
+                      <span>Selected location</span>
                       <h2>{selected.name}</h2>
                       <p>
                         {formatCoordinate(selected.lat, true)} · {formatCoordinate(selected.lon, false)}
@@ -1405,6 +1429,12 @@ export default function EclipseExplorer() {
                         <button type="button" onClick={() => exportData('ics')}>
                           <CalendarDays size={16} aria-hidden="true" /> Add to calendar
                         </button>
+                        <button type="button" onClick={shareView}>
+                          <Share2 size={16} aria-hidden="true" /> Share this spot
+                        </button>
+                        <button type="button" onClick={() => window.print()}>
+                          <Printer size={16} aria-hidden="true" /> Print field card
+                        </button>
                       </div>
 
                       {profile && <HorizonCard profile={profile} sunAltitude={local.maximum?.altitude ?? 0} />}
@@ -1467,6 +1497,26 @@ export default function EclipseExplorer() {
                   )}
                 </section>
               )}
+
+              {data && (
+                <div className="event-summary" aria-label="Global eclipse summary">
+                  <div>
+                    <span>Greatest</span>
+                    <strong>{formatTime(data.greatestTime, 'UTC').replace(' UTC', '')}</strong>
+                    <small>UTC</small>
+                  </div>
+                  <div>
+                    <span>Global magnitude</span>
+                    <strong>{data.magnitude.toFixed(3)}</strong>
+                    <small>{percent(data.obscuration)} obscured</small>
+                  </div>
+                  <div>
+                    <span>{data.type === 'partial' ? 'Saros series' : data.type === 'annular' ? 'Annularity' : 'Totality'}</span>
+                    <strong>{data.type === 'partial' ? data.saros : formatDuration(data.centralDurationSeconds, true)}</strong>
+                    <small>{data.type === 'partial' ? 'Global partial eclipse' : 'Saros ' + data.saros}</small>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -1509,6 +1559,7 @@ export default function EclipseExplorer() {
         <section className="timeline-dock" aria-label="Eclipse timeline">
           <button className="play-button" type="button" onClick={togglePlayback} aria-label={playing ? 'Pause animation' : 'Play animation'}>
             {playing ? <Pause size={15} fill="currentColor" aria-hidden="true" /> : <Play size={15} fill="currentColor" aria-hidden="true" />}
+            <span className="play-text">{playing ? 'Pause' : 'Play'}</span>
           </button>
           <div className="timeline-now">
             <strong>{formatTime(new Date(timeMs || data.greatestTime), displayZone).replace(/ [A-Z+].*$/, '')}</strong>
@@ -1534,6 +1585,11 @@ export default function EclipseExplorer() {
                   const left = ((contact.date.getTime() - timelineBounds.start) / (timelineBounds.end - timelineBounds.start)) * 100;
                   return <i key={contact.key} style={{ left: Math.max(0, Math.min(100, left)) + '%' }} />;
                 })}
+            </div>
+            <div className="timeline-labels" aria-hidden="true">
+              <span>{local?.contacts.find((contact) => contact.key === 'c1')?.shortLabel ?? 'Start'}</span>
+              <span>Maximum</span>
+              <span>{local?.contacts.find((contact) => contact.key === 'c4')?.shortLabel ?? 'End'}</span>
             </div>
           </div>
           <button className="timeline-time-mode" type="button" onClick={() => setTimeMode(timeMode === 'local' ? 'utc' : 'local')}>
@@ -1564,7 +1620,7 @@ export default function EclipseExplorer() {
             <div className="drawer-header">
               <div>
                 <span>{drawer === 'catalog' ? 'Five millennia' : drawer === 'search' ? 'Places' : drawer === 'layers' ? 'Map' : 'Umbra'}</span>
-                <h2>{drawer === 'catalog' ? 'Solar eclipse catalog' : drawer === 'search' ? 'Find a place' : drawer === 'layers' ? 'Layers & view' : 'Plan, save & share'}</h2>
+                <h2>{drawer === 'catalog' ? 'Solar eclipse catalog' : drawer === 'search' ? 'Find a place' : drawer === 'layers' ? 'Layers & view' : 'Advanced & exports'}</h2>
               </div>
               <button className="mini-icon" type="button" onClick={() => setDrawer(null)} aria-label="Close panel">
                 <X size={18} aria-hidden="true" />
@@ -1704,6 +1760,23 @@ export default function EclipseExplorer() {
             {drawer === 'layers' && (
               <div className="drawer-content">
                 <section className="settings-section">
+                  <span className="list-label">Map setup</span>
+                  <div className="layer-presets" aria-label="Layer presets">
+                    {LAYER_PRESET_LABELS.map((preset) => (
+                      <button
+                        className={activeLayerPreset === preset.id ? 'active' : ''}
+                        type="button"
+                        key={preset.id}
+                        onClick={() => applyLayerPreset(preset.id)}
+                        aria-pressed={activeLayerPreset === preset.id}
+                      >
+                        <strong>{preset.label}</strong>
+                        <small>{preset.detail}</small>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+                <section className="settings-section">
                   <span className="list-label">Base map</span>
                   <div className="base-map-grid">
                     {BASE_LABELS.map((item) => (
@@ -1716,30 +1789,36 @@ export default function EclipseExplorer() {
                     ))}
                   </div>
                 </section>
-                <section className="settings-section">
-                  <span className="list-label">Eclipse geometry</span>
-                  <ToggleRow label="Central path & limits" detail="Total, annular, or hybrid band" color={eventColor} checked={layers.path} onChange={(value) => setLayer('path', value)} />
-                  <ToggleRow label="Center line" detail="Maximum duration along the path" color="#2F68D8" checked={layers.center} onChange={(value) => setLayer('center', value)} />
-                  <ToggleRow label="Partial visibility" detail="Penumbra footprint" color="#237A57" checked={layers.partial} onChange={(value) => setLayer('partial', value)} />
-                  <ToggleRow label="Sunrise & sunset limits" detail="Low-horizon boundaries" color="#B67A12" checked={layers.horizons} onChange={(value) => setLayer('horizons', value)} />
-                  <ToggleRow label="10-minute path ticks" detail="Timing guides across the center line" color="#6E56CF" checked={layers.guides} onChange={(value) => setLayer('guides', value)} />
-                  <ToggleRow label="Magnitude contours" detail="Approximate planning lines in 0.2 steps" color="#237A57" checked={layers.magnitude} onChange={(value) => setLayer('magnitude', value)} />
-                  <ToggleRow label="Maximum-time contours" detail="Approximate local maximum every 30 min" color="#6E56CF" checked={layers.timeContours} onChange={(value) => setLayer('timeContours', value)} />
-                  <ToggleRow label="Live umbral shadow" detail="Follows the timeline" color="#18211D" checked={layers.shadow} onChange={(value) => setLayer('shadow', value)} />
-                </section>
+                <details className="layer-details">
+                  <summary>Individual layers <ChevronDown size={15} aria-hidden="true" /></summary>
+                  <section className="settings-subsection">
+                    <span className="list-label">Essential</span>
+                    <ToggleRow label="Central path & limits" detail="Total, annular, or hybrid band" color={eventColor} checked={layers.path} onChange={(value) => setLayer('path', value)} />
+                    <ToggleRow label="Center line" detail="Maximum duration along the path" color={eventColor} checked={layers.center} onChange={(value) => setLayer('center', value)} />
+                    <ToggleRow label="Partial visibility" detail="Penumbra footprint" color="#536D74" checked={layers.partial} onChange={(value) => setLayer('partial', value)} />
+                    <ToggleRow label="Moving shadow" detail="Follows the timeline" color="#102630" checked={layers.shadow} onChange={(value) => setLayer('shadow', value)} />
+                  </section>
+                  <section className="settings-subsection">
+                    <span className="list-label">Planning</span>
+                    <ToggleRow label="Sunrise & sunset limits" detail="Low-horizon boundaries" color="#536D74" checked={layers.horizons} onChange={(value) => setLayer('horizons', value)} />
+                    <ToggleRow label="10-minute path ticks" detail="Timing guides across the center line" color="#536D74" checked={layers.guides} onChange={(value) => setLayer('guides', value)} />
+                    <ToggleRow label="Day, twilight & night" detail="Civil, nautical, astronomical" color="#536D74" checked={layers.night} onChange={(value) => setLayer('night', value)} />
+                    <ToggleRow label="Night lights" detail="NASA Earth at Night" color="#536D74" checked={layers.lightPollution} onChange={(value) => setLayer('lightPollution', value)} />
+                    {layers.lightPollution && (
+                      <label className="opacity-row"><span>Overlay strength</span><input type="range" min="0.15" max="0.95" step="0.05" value={nightOpacity} onChange={(event) => setNightOpacity(Number(event.target.value))} /></label>
+                    )}
+                  </section>
+                  <section className="settings-subsection">
+                    <span className="list-label">Analysis</span>
+                    <ToggleRow label="Magnitude contours" detail="Approximate planning lines in 0.2 steps" color="#536D74" checked={layers.magnitude} onChange={(value) => setLayer('magnitude', value)} />
+                    <ToggleRow label="Maximum-time contours" detail="Approximate local maximum every 30 min" color="#536D74" checked={layers.timeContours} onChange={(value) => setLayer('timeContours', value)} />
+                  </section>
+                </details>
                 {(layers.magnitude || layers.timeContours) && (
                   <p className="contour-note">
                     Hover a contour to read its value. These 2° planning contours are approximate; use point calculations for exact local circumstances.
                   </p>
                 )}
-                <section className="settings-section">
-                  <span className="list-label">Planning overlays</span>
-                  <ToggleRow label="Day, twilight & night" detail="Civil, nautical, astronomical" color="#6E56CF" checked={layers.night} onChange={(value) => setLayer('night', value)} />
-                  <ToggleRow label="Night lights" detail="NASA Earth at Night" color="#F1B94B" checked={layers.lightPollution} onChange={(value) => setLayer('lightPollution', value)} />
-                  {layers.lightPollution && (
-                    <label className="opacity-row"><span>Overlay strength</span><input type="range" min="0.15" max="0.95" step="0.05" value={nightOpacity} onChange={(event) => setNightOpacity(Number(event.target.value))} /></label>
-                  )}
-                </section>
                 <p className="map-hint">Tap for local circumstances · right-click to center and zoom · Shift-drag for box zoom.</p>
               </div>
             )}
