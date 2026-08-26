@@ -665,6 +665,20 @@ summary:focus-visible {
   font-size: 12px;
 }
 
+.horizon-status {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.horizon-status .tiny-spinner {
+  flex: 0 0 auto;
+}
+
 .upcoming-eclipses {
   margin-top: 20px;
   border-top: 1px solid var(--line);
@@ -1533,10 +1547,6 @@ button.comparison-row:hover,
   bottom: 74px;
 }
 
-.print-field-card {
-  display: none;
-}
-
 @media (max-width: 940px) and (min-width: 761px) {
   .atlas-app {
     --rail-width: 360px;
@@ -2001,122 +2011,5 @@ button.comparison-row:hover,
   .type-dot,
   .toggle-row > i {
     forced-color-adjust: none;
-  }
-}
-
-@media print {
-  @page {
-    margin: 14mm;
-  }
-
-  html,
-  body,
-  .atlas-app {
-    overflow: visible !important;
-    background: #fff !important;
-    color: #000 !important;
-  }
-
-  .atlas-app {
-    position: static !important;
-  }
-
-  .atlas-app > :not(.print-field-card) {
-    display: none !important;
-  }
-
-  .print-field-card {
-    display: block !important;
-    max-width: 180mm;
-    margin: 0 auto;
-    break-inside: avoid;
-    color: #000;
-    font: 10.5pt/1.4 Arial, sans-serif;
-  }
-
-  .print-field-card header {
-    padding: 0 0 8mm;
-    border-bottom: 2px solid #000;
-  }
-
-  .print-field-card header span,
-  .print-field-card section span {
-    display: block;
-    margin-bottom: 2mm;
-    font-size: 8.5pt;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-  }
-
-  .print-field-card header strong {
-    display: block;
-    font-size: 20pt;
-    line-height: 1.15;
-  }
-
-  .print-field-card section {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10mm;
-    padding: 8mm 0;
-    border-bottom: 1px solid #000;
-  }
-
-  .print-field-card section strong,
-  .print-field-card section small {
-    display: block;
-  }
-
-  .print-field-card section strong {
-    margin-bottom: 2mm;
-    font-size: 13pt;
-    line-height: 1.25;
-  }
-
-  .print-field-card section small {
-    font-size: 9.5pt;
-  }
-
-  .print-field-card table {
-    width: 100%;
-    margin: 8mm 0;
-    border-collapse: collapse;
-    table-layout: fixed;
-  }
-
-  .print-field-card th,
-  .print-field-card td {
-    padding: 3.2mm 2mm;
-    border-bottom: 0.5pt solid #777;
-    vertical-align: top;
-    text-align: left;
-  }
-
-  .print-field-card th {
-    border-bottom-color: #000;
-    font-size: 8.5pt;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-  }
-
-  .print-field-card th:first-child,
-  .print-field-card td:first-child {
-    width: 32%;
-    padding-left: 0;
-  }
-
-  .print-field-card th:last-child,
-  .print-field-card td:last-child {
-    width: 31%;
-    padding-right: 0;
-  }
-
-  .print-field-card footer {
-    margin-top: 8mm;
-    padding: 4mm;
-    border: 1px solid #000;
-    font-size: 10pt;
-    font-weight: 700;
   }
 }

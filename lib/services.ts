@@ -165,7 +165,7 @@ function spacedDistances(count: number, minimum: number, maximum: number) {
 }
 
 export async function fetchHorizonProfile(
-  location: SelectedLocation,
+  location: Pick<SelectedLocation, 'lat' | 'lon' | 'elevation'>,
   bearing: number,
   sunAltitude: number,
 ): Promise<HorizonProfile> {

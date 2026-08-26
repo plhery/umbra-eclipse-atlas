@@ -33,7 +33,6 @@ import {
   Navigation,
   Pause,
   Play,
-  Printer,
   Presentation,
   Route,
   Search,
@@ -513,6 +512,8 @@ export default function EclipseExplorer() {
   ]);
 
   const localObservability = observability(local);
+  const horizonAzimuth = local?.maximum?.azimuth;
+  const horizonAltitude = local?.maximum?.altitude;
   const maximumViewLine = useMemo(() => {
     if (!selected || !local?.maximum) return [];
     return [
@@ -639,6 +640,56 @@ export default function EclipseExplorer() {
     window.setTimeout(() => setToast(''), 2400);
   }, []);
 
+  useEffect(() => {
+    if (
+      selectedLat === undefined ||
+      selectedLon === undefined ||
+      selectedElevation === undefined ||
+      horizonAzimuth === undefined ||
+      horizonAltitude === undefined ||
+      elevationStatus === 'loading' ||
+      data?.date !== eventDate ||
+      local?.type === 'none' ||
+      localObservability === 'below'
+    ) return;
+
+    let active = true;
+    const timeout = window.setTimeout(() => {
+      setProfileLoading(true);
+      fetchHorizonProfile(
+        { lat: selectedLat, lon: selectedLon, elevation: selectedElevation },
+        horizonAzimuth,
+        horizonAltitude,
+      )
+        .then((result) => {
+          if (active) setProfile(result);
+        })
+        .catch(() => {
+          if (active) showToast('Terrain skyline is temporarily unavailable');
+        })
+        .finally(() => {
+          if (active) setProfileLoading(false);
+        });
+    }, 180);
+
+    return () => {
+      active = false;
+      window.clearTimeout(timeout);
+    };
+  }, [
+    data?.date,
+    elevationStatus,
+    eventDate,
+    horizonAltitude,
+    horizonAzimuth,
+    local?.type,
+    localObservability,
+    selectedElevation,
+    selectedLat,
+    selectedLon,
+    showToast,
+  ]);
+
   const choosePoint = useCallback(
     (
       lat: number,
@@ -658,6 +709,7 @@ export default function EclipseExplorer() {
       setSelected(provisional);
       setTimezoneOverride('');
       setProfile(null);
+      setProfileLoading(false);
       setElevationStatus(elevation === undefined ? 'loading' : 'provided');
       setSheetSnap('peek');
       eventPanelScrollRef.current?.scrollTo({ top: 0 });
@@ -1213,6 +1265,7 @@ export default function EclipseExplorer() {
     setPlaying(false);
     setDrawer(null);
     setProfile(null);
+    setProfileLoading(false);
     setTimelineIntent('auto');
     setEventDate(date);
     setSheetSnap('peek');
@@ -1391,6 +1444,7 @@ export default function EclipseExplorer() {
     (elevation: number) => {
       setElevationStatus('provided');
       setProfile(null);
+      setProfileLoading(false);
       setSelected((current) => (current ? { ...current, elevation } : current));
       if (!selected) return;
       setSavedPlaces((current) => {
@@ -1653,27 +1707,6 @@ export default function EclipseExplorer() {
     },
     [data, selected, local, timezone, timezoneOverride, showToast],
   );
-
-  const inspectHorizon = useCallback(async () => {
-    if (!selected || !local?.maximum) {
-      showToast('Choose a visible location first');
-      return;
-    }
-    setProfileLoading(true);
-    try {
-      const result = await fetchHorizonProfile(
-        selected,
-        local.maximum.azimuth,
-        local.maximum.altitude,
-      );
-      setProfile(result);
-      showToast(result.obstructed ? 'Terrain may reach the Sun' : 'Terrain skyline is clear');
-    } catch {
-      showToast('Terrain profile is temporarily unavailable');
-    } finally {
-      setProfileLoading(false);
-    }
-  }, [selected, local, showToast]);
 
   const toggleComparison = useCallback(
     (date: string) => {
@@ -2024,21 +2057,19 @@ export default function EclipseExplorer() {
                       </div>
 
                       <div className="field-tools">
-                        <button type="button" onClick={inspectHorizon} disabled={profileLoading || !local.maximum || localObservability === 'below'}>
-                          <Route size={16} aria-hidden="true" />
-                          {profileLoading ? 'Building skyline…' : localObservability === 'below' ? 'Sun below horizon' : profile ? 'Rescan horizon' : 'Check the horizon'}
-                        </button>
                         <button type="button" onClick={() => exportData('ics')}>
                           <CalendarDays size={16} aria-hidden="true" /> Add to calendar
                         </button>
                         <button type="button" onClick={shareView}>
                           <Share2 size={16} aria-hidden="true" /> Share this spot
                         </button>
-                        <button type="button" onClick={() => window.print()}>
-                          <Printer size={16} aria-hidden="true" /> Print field card
-                        </button>
                       </div>
 
+                      {profileLoading && (
+                        <p className="horizon-status" role="status">
+                          <span className="tiny-spinner" /> Building terrain skyline…
+                        </p>
+                      )}
                       {profile && <HorizonCard profile={profile} sunAltitude={local.maximum?.altitude ?? 0} />}
 
                       {liveCircumstances && (
@@ -2219,42 +2250,6 @@ export default function EclipseExplorer() {
           )}
         </div>
       </aside>
-
-      {data && selected && local && (
-        <article className="print-field-card">
-          <header>
-            <span>Umbra field card</span>
-            <strong>{formatDateLabel(data.date)} · {TYPE_LABELS[data.type]} solar eclipse</strong>
-          </header>
-          <section>
-            <div>
-              <span>Observer</span>
-              <strong>{selected.name}</strong>
-              <small>{toDms(selected.lat, true)} · {toDms(selected.lon, false)} · {Math.round(selected.elevation)} m</small>
-            </div>
-            <div>
-              <span>Local result</span>
-              <strong>{typeSentence(local.type, localObservability)}</strong>
-              <small>{local.maximum ? percent(local.obscuration) + ' covered · maximum ' + formatTime(local.maximum.date, displayZone) : 'Outside the visibility area'}</small>
-            </div>
-          </section>
-          {!!local.contacts.length && (
-            <table>
-              <thead><tr><th>Contact</th><th>Time</th><th>Sun</th></tr></thead>
-              <tbody>
-                {local.contacts.map((contact) => (
-                  <tr key={contact.key}>
-                    <td>{contact.shortLabel} · {contact.label}</td>
-                    <td>{formatTime(contact.date, displayZone)}</td>
-                    <td>{contact.altitude.toFixed(1)}° · {Math.round(contact.azimuth)}° {compassDirection(contact.azimuth)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-          <footer>{safetySentence(local.type, localObservability)}</footer>
-        </article>
-      )}
 
       <div className="map-tools" aria-label="Map tools">
         <button
@@ -2644,7 +2639,6 @@ export default function EclipseExplorer() {
                     >
                       <Clipboard size={17} /><span>Copy embed</span>
                     </button>
-                    <button type="button" onClick={() => window.print()}><Printer size={17} /><span>Field card</span></button>
                     <button type="button" onClick={() => exportData('ics')}><CalendarDays size={17} /><span>Calendar</span></button>
                     <button type="button" onClick={enterPresentation}><Presentation size={17} /><span>Present map</span></button>
                   </div>
