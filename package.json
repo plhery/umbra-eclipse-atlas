@@ -1,7 +1,18 @@
 {
-  "name": "sites-project",
+  "name": "umbra-eclipse-atlas",
   "version": "0.1.0",
   "private": true,
+  "description": "A mobile-first solar eclipse atlas for exploring the Moon's shadow and planning what you will see from any point on Earth.",
+  "homepage": "https://umbra-eclipse.plhery.com/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/plhery/umbra-eclipse-atlas.git"
+  },
+  "bugs": {
+    "url": "https://github.com/plhery/umbra-eclipse-atlas/issues"
+  },
+  "license": "MIT",
+  "packageManager": "pnpm@11.19.0",
   "engines": {
     "node": ">=22.13.0"
   },

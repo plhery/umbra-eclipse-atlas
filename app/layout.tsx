@@ -23,8 +23,9 @@ const barlowCondensed = Barlow_Condensed({
 
 export const metadata: Metadata = {
   metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL || 'https://umbra-eclipse-atlas.plhery.chatgpt.site',
+    process.env.NEXT_PUBLIC_SITE_URL || 'https://umbra-eclipse.plhery.com',
   ),
+  alternates: { canonical: '/' },
   title: {
     default: 'Umbra — Solar eclipse atlas',
     template: '%s · Umbra',

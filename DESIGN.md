@@ -46,17 +46,17 @@ Design response: a compact persistent timeline, large touch targets, high-contra
 
 **Question:** Is this site worth traveling to, and can I coordinate it?
 
-Journey: inspect the path → choose a place → check distance to center/edge and terrain horizon → save the place → add the event to a calendar → share or print a field card.
+Journey: inspect the path → choose a place → check distance to center/edge and terrain horizon → save the place → add the event to a calendar → share the exact view.
 
-Design response: the Plan map preset, horizon sampling, saved places, and result-adjacent calendar/share/print actions.
+Design response: the Plan map preset, automatic horizon sampling, saved places, and result-adjacent calendar/share actions.
 
 ### 5. Photographer or field operator
 
 **Question:** What are the precise timing and sky geometry at my setup?
 
-Journey: select coordinates/elevation → review contacts → inspect Sun altitude and azimuth → sample the horizon → export a local CSV or field card.
+Journey: select coordinates/elevation → review contacts → inspect Sun altitude, azimuth, and terrain skyline → export a local CSV.
 
-Design response: exact measurements remain available in Planning details, while the main verdict stays uncluttered.
+Design response: exact measurements and the automatic terrain skyline remain available in Planning details, while the main verdict stays uncluttered.
 
 ### 6. Educator, student, or science communicator
 

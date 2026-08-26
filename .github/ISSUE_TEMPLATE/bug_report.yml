@@ -1,0 +1,49 @@
+name: Bug report
+description: Report something that is broken or gives an incorrect result.
+title: "Bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for taking the time to make Umbra better. Please share the exact eclipse URL when possible.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe what you saw and what you expected instead.
+    validations:
+      required: true
+  - type: input
+    id: url
+    attributes:
+      label: Eclipse or shared-view URL
+      placeholder: https://umbra-eclipse.plhery.com/?e=...
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open…
+        2. Select…
+        3. See…
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Browser and device
+      placeholder: Safari 18 on iPhone 15, or Firefox 142 on macOS
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots, recordings, or calculation references
+      description: Drag files here. For prediction errors, include the source used for comparison.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for the same problem.
+          required: true
