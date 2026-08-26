@@ -2715,7 +2715,10 @@ function HorizonCard({
   const sunY = y(sunAltitude);
   const sunLabelY = sunY < 22 ? sunY + 16 : sunY - 8;
   return (
-    <div className={profile.obstructed ? 'horizon-card obstructed' : 'horizon-card clear'}>
+    <div
+      className={profile.obstructed ? 'horizon-card obstructed' : 'horizon-card clear'}
+      aria-live="polite"
+    >
       <div className="horizon-heading">
         <span>Terrain skyline · facing {Math.round(profile.bearing)}° {compassDirection(profile.bearing)}</span>
         <strong>
