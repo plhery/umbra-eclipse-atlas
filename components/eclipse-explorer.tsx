@@ -1754,7 +1754,10 @@ export default function EclipseExplorer() {
     const drag = {
       pointerId: event.pointerId,
       startY: event.clientY,
-      startHeight: panel.getBoundingClientRect().height,
+      // The mobile sheet keeps a full-height compositor layer and reveals the
+      // active snap with translateY. Measure only the visible portion so direct
+      // manipulation stays under the finger.
+      startHeight: window.innerHeight - panel.getBoundingClientRect().top,
       moved: false,
     };
     sheetDragRef.current = drag;
@@ -1844,7 +1847,9 @@ export default function EclipseExplorer() {
       />
       {mapReady && !selected && !presentationMode && (
         <div className="map-start-hint" role="note">
-          <MapPin size={17} aria-hidden="true" />
+          <span className="map-hint-target" aria-hidden="true">
+            <MapPin size={16} />
+          </span>
           <span>
             <strong>Choose any point on the map</strong>
             <small>Tap or click to see the eclipse there</small>
@@ -2017,7 +2022,10 @@ export default function EclipseExplorer() {
                     </button>
                   </div>
 
-                  <div className={'visibility-verdict verdict-' + (local?.type ?? 'none') + ' observability-' + localObservability}>
+                  <div
+                    key={`${eventDate}:${selected.lat.toFixed(5)}:${selected.lon.toFixed(5)}`}
+                    className={'visibility-verdict verdict-' + (local?.type ?? 'none') + ' observability-' + localObservability}
+                  >
                     <span className="verdict-icon">{local?.type === 'none' ? <Moon size={19} /> : <Sun size={19} />}</span>
                     <div>
                       <strong>{typeSentence(local?.type ?? 'none', localObservability)}</strong>
@@ -2335,13 +2343,22 @@ export default function EclipseExplorer() {
 
       {data && (
         <section className="timeline-dock" aria-label="Eclipse timeline">
-          <button className="play-button" type="button" onClick={togglePlayback} aria-label={playing ? 'Pause animation' : 'Play animation'}>
+          <button
+            className={playing ? 'play-button playing' : 'play-button'}
+            type="button"
+            onClick={togglePlayback}
+            aria-label={playing ? 'Pause animation' : 'Play animation'}
+            aria-pressed={playing}
+          >
             {playing ? <Pause size={15} fill="currentColor" aria-hidden="true" /> : <Play size={15} fill="currentColor" aria-hidden="true" />}
             <span className="play-text">{playing ? 'Pause' : 'Play'}</span>
           </button>
           <div className="timeline-now">
             <strong>{formatTime(new Date(timeMs || data.greatestTime), displayZone).replace(/ [A-Z+].*$/, '')}</strong>
-            <span>{timelineStatus} · {displayZone === 'UTC' ? 'UTC' : displayZone.split('/').at(-1)?.replaceAll('_', ' ')}</span>
+            <span className="timeline-context">
+              <span>{timelineStatus}</span>
+              <span className="timeline-zone"> · {displayZone === 'UTC' ? 'UTC' : displayZone.split('/').at(-1)?.replaceAll('_', ' ')}</span>
+            </span>
           </div>
           <div className="timeline-range">
             <input
@@ -2381,7 +2398,11 @@ export default function EclipseExplorer() {
             </div>
           </div>
           <button
-            className="timeline-reset"
+            className={
+              timelineStatus === (nowAvailable ? 'Now' : 'Maximum')
+                ? 'timeline-reset active'
+                : 'timeline-reset'
+            }
             type="button"
             onClick={() => {
               setPlaying(false);

@@ -2183,7 +2183,8 @@ summary:focus-visible {
     width: auto;
     height: var(--mobile-sheet);
     border-radius: 20px;
-    transition: height 220ms cubic-bezier(0.22, 0.8, 0.22, 1);
+    /* The observatory layer animates the sheet on the compositor with transform. */
+    transition: none;
   }
 
   .sheet-grabber {
