@@ -34,6 +34,7 @@ Open [http://localhost:3000](http://localhost:3000). No API keys or database are
 Before opening a pull request:
 
 ```bash
+pnpm test
 pnpm lint
 pnpm build
 ```
@@ -46,6 +47,11 @@ pnpm build
 - `lib/services.ts` — geocoding, elevation, and terrain skyline helpers
 - `app/api/geocode/route.ts` — rate-limited OpenStreetMap geocoding proxy
 - `DESIGN.md` — product principles, personas, and interface priorities
+
+## Analytics
+
+The public deployment uses self-hosted Umami for pageviews and named product actions.
+See [ANALYTICS.md](ANALYTICS.md) for events, privacy boundaries, iOS support, and verification.
 
 ## Calculations and data
 

@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import AtlasAnalytics from '@/components/atlas-analytics';
 import { Barlow_Condensed, IBM_Plex_Mono, IBM_Plex_Sans } from 'next/font/google';
 import './globals.css';
 import './observatory.css';
@@ -58,6 +59,7 @@ export default function RootLayout({
         className={`${plexSans.variable} ${plexMono.variable} ${barlowCondensed.variable} antialiased`}
       >
         {children}
+        <AtlasAnalytics />
       </body>
     </html>
   );

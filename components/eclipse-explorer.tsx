@@ -41,6 +41,7 @@ import {
   X,
 } from 'lucide-react';
 import tzLookup from 'tz-lookup';
+import { trackEvent, trackThrottled, trackDebounced } from '@/lib/analytics';
 import type { Map as MapLibreMap } from 'maplibre-gl';
 import mapLibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import { TimeOfInterest } from '@astronomy-bundle/core';
@@ -341,7 +342,7 @@ export default function EclipseExplorer() {
   const presentationLayersRef = useRef<LayerVisibility | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const choosePointRef = useRef<
-    (lat: number, lon: number, name?: string, accuracy?: number, elevation?: number) => void
+    (lat: number, lon: number, name?: string, accuracy?: number, elevation?: number, source?: string) => void
   >(() => undefined);
   const urlStateRef = useRef<ReturnType<typeof getInitialUrlState>>(null);
   const initialMapViewHandledRef = useRef(false);
@@ -489,6 +490,7 @@ export default function EclipseExplorer() {
         })
         .catch(() => {
           if (active) {
+            trackThrottled('service_error', { service: 'upcoming_eclipses' });
             setUpcomingLookup({
               key: requestKey,
               results: null,
@@ -665,7 +667,10 @@ export default function EclipseExplorer() {
           if (active) setProfile(result);
         })
         .catch(() => {
-          if (active) showToast('Terrain skyline is temporarily unavailable');
+          if (active) {
+            trackThrottled('service_error', { service: 'terrain' });
+            showToast('Terrain skyline is temporarily unavailable');
+          }
         })
         .finally(() => {
           if (active) setProfileLoading(false);
@@ -697,7 +702,9 @@ export default function EclipseExplorer() {
       name = 'Selected point',
       accuracy?: number,
       elevation?: number,
+      source = 'map',
     ) => {
+      trackEvent('location_select', { source });
       const requestId = ++selectionRequestRef.current;
       const provisional: SelectedLocation = {
         lat: Math.max(-90, Math.min(90, lat)),
@@ -723,6 +730,8 @@ export default function EclipseExplorer() {
           : Promise.resolve(elevation),
       ]).then(([resolvedName, resolvedElevation]) => {
         if (selectionRequestRef.current !== requestId) return;
+        if (resolvedName.status === 'rejected') trackThrottled('service_error', { service: 'reverse_geocode' });
+        if (resolvedElevation.status === 'rejected') trackThrottled('service_error', { service: 'elevation' });
         if (elevation === undefined) {
           setElevationStatus(resolvedElevation.status === 'fulfilled' ? 'measured' : 'unavailable');
         }
@@ -824,6 +833,7 @@ export default function EclipseExplorer() {
         initial.selected.name,
         undefined,
         initial.hasElevation ? initial.selected.elevation : undefined,
+        'shared_link',
       );
       setTimezoneOverride(initial.timezoneOverride);
     }
@@ -841,6 +851,10 @@ export default function EclipseExplorer() {
 
   useEffect(() => {
     const previous = previousDrawerRef.current;
+    if (previous !== drawer) {
+      if (previous) trackEvent('panel_close', { panel: previous });
+      if (drawer) trackEvent('panel_view', { panel: drawer });
+    }
     if (drawer && !previous) {
       const active = document.activeElement;
       if (active instanceof HTMLElement) drawerReturnFocusRef.current = active;
@@ -876,11 +890,13 @@ export default function EclipseExplorer() {
         pitchWithRotate: false,
       });
       mapRef.current = map;
+      map.on('error', () => trackThrottled('service_error', { service: 'map' }, 30_000));
       map.touchZoomRotate.disableRotation();
       map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
       map.addControl(new maplibregl.ScaleControl({ maxWidth: 110, unit: 'metric' }), 'bottom-right');
       map.addControl(new maplibregl.FullscreenControl(), 'bottom-right');
       map.on('load', () => {
+        trackEvent('map_ready', { duration_ms: Math.round(performance.now()) });
         installEclipseLayers(map);
         const showContour = (kind: 'Magnitude' | 'Maximum time') =>
           (event: import('maplibre-gl').MapLayerMouseEvent) => {
@@ -905,6 +921,7 @@ export default function EclipseExplorer() {
         choosePointRef.current(event.lngLat.lat, event.lngLat.lng);
       });
       map.on('contextmenu', (event) => {
+        trackThrottled('map_move', { action: 'context_zoom', zoom: Math.round(map.getZoom()) });
         map.easeTo({
           center: event.lngLat,
           zoom: Math.min(12, map.getZoom() + 2),
@@ -918,7 +935,8 @@ export default function EclipseExplorer() {
         setCursor({ lat: event.lngLat.lat, lon: event.lngLat.lng });
       });
       map.on('mouseout', () => setCursor(null));
-      map.on('moveend', () => {
+      map.on('moveend', (event) => {
+        if (event.originalEvent) trackThrottled('map_move', { action: 'pan_zoom', zoom: Math.round(map.getZoom()) });
         const center = map.getCenter();
         setMapCenter({ lat: center.lat, lon: center.lng, zoom: map.getZoom() });
       });
@@ -932,9 +950,11 @@ export default function EclipseExplorer() {
 
   useEffect(() => {
     let active = true;
+    const startedAt = performance.now();
     loadEclipse(eventDate)
       .then((loaded) => {
         if (!active) return;
+        trackEvent('eclipse_loaded', { eclipse: loaded.date, kind: loaded.type, duration_ms: Math.round(performance.now() - startedAt) });
         setData(loaded);
         setTimeMs((current) =>
           current && current >= loaded.rangeStart.getTime() && current <= loaded.rangeEnd.getTime()
@@ -944,6 +964,7 @@ export default function EclipseExplorer() {
       })
       .catch((error: unknown) => {
         if (!active) return;
+        trackEvent('service_error', { service: 'eclipse' });
         setLoadError(error instanceof Error ? error.message : 'This eclipse could not be loaded.');
       })
       .finally(() => {
@@ -1067,6 +1088,7 @@ export default function EclipseExplorer() {
       playbackTimeRef.current = next;
       setTimeMs(next);
       if (next >= timelineBounds.end) {
+        trackEvent('timeline_playback', { action: 'complete' });
         setPlaying(false);
         return;
       }
@@ -1097,6 +1119,7 @@ export default function EclipseExplorer() {
   }, [mapReady, maximumViewLine]);
 
   const togglePlayback = useCallback(() => {
+    trackEvent('timeline_playback', { action: playing ? 'pause' : 'play' });
     if (playing) {
       setPlaying(false);
       setTimelineIntent('manual');
@@ -1114,22 +1137,26 @@ export default function EclipseExplorer() {
 
   const startLocationTracking = useCallback(() => {
     if (!('geolocation' in navigator)) {
+      trackEvent('location_result', { status: 'unsupported' });
       const message = 'Location is not available in this browser. Search for a place instead.';
       setLocationError(message);
       showToast(message);
       return;
     }
     if (tracking) return;
+    trackEvent('location_request');
     setTimezoneOverride('');
     setLocationError('');
     setTracking(true);
     navigator.geolocation.getCurrentPosition(
       (position) => {
         const { latitude, longitude, accuracy, altitude } = position.coords;
-        choosePoint(latitude, longitude, 'My location', accuracy, altitude ?? undefined);
+        trackEvent('location_result', { status: 'success' });
+        choosePoint(latitude, longitude, 'My location', accuracy, altitude ?? undefined, 'geolocation');
         setTracking(false);
       },
-      () => {
+      (error) => {
+        trackEvent('location_result', { status: error.code === 1 ? 'denied' : error.code === 3 ? 'timeout' : 'unavailable' });
         setTracking(false);
         const message = 'Location access was not available. Search for a place or try again.';
         setLocationError(message);
@@ -1140,6 +1167,7 @@ export default function EclipseExplorer() {
   }, [tracking, choosePoint, showToast]);
 
   const enterPresentation = useCallback(() => {
+    trackEvent('presentation', { enabled: true });
     presentationLayersRef.current = layers;
     setLayers({ ...LAYER_PRESETS.explain });
     setDrawer(null);
@@ -1151,6 +1179,7 @@ export default function EclipseExplorer() {
   }, [data, layers]);
 
   const exitPresentation = useCallback(() => {
+    trackEvent('presentation', { enabled: false });
     if (presentationLayersRef.current) {
       setLayers(presentationLayersRef.current);
       presentationLayersRef.current = null;
@@ -1206,10 +1235,12 @@ export default function EclipseExplorer() {
         event.preventDefault();
         togglePlayback();
       } else if (event.key === 'ArrowLeft') {
+        trackDebounced('timeline_seek', { source: 'keyboard', target: 'previous_minute' });
         event.preventDefault();
         setTimelineIntent('manual');
         setTimeMs((value) => Math.max(timelineBounds.start, value - 60_000));
       } else if (event.key === 'ArrowRight') {
+        trackDebounced('timeline_seek', { source: 'keyboard', target: 'next_minute' });
         event.preventDefault();
         setTimelineIntent('manual');
         setTimeMs((value) => Math.min(timelineBounds.end, value + 60_000));
@@ -1259,7 +1290,8 @@ export default function EclipseExplorer() {
     presentationMode,
   ]);
 
-  const changeEvent = useCallback(async (date: string) => {
+  const changeEvent = useCallback(async (date: string, source = 'catalog') => {
+    trackEvent('eclipse_select', { eclipse: date, source });
     setLoading(true);
     setLoadError('');
     setPlaying(false);
@@ -1275,9 +1307,10 @@ export default function EclipseExplorer() {
     async (direction: -1 | 1) => {
       try {
         const next = await getAdjacentEclipseDate(eventDate, direction);
-        if (next) changeEvent(next);
+        if (next) changeEvent(next, direction === 1 ? 'next' : 'previous');
         else showToast('End of the eclipse catalog');
       } catch {
+        trackEvent('service_error', { service: 'adjacent_eclipse' });
         showToast('Could not load the adjacent eclipse');
       }
     },
@@ -1309,15 +1342,20 @@ export default function EclipseExplorer() {
 
   const runCatalogSearch = useCallback(async () => {
     setCatalogError('');
+    const startedAt = performance.now();
+    trackEvent('catalog_search', { from_year: fromYear, to_year: toYear, types: typeFilters.join(','), visible_here: visibleHere, central_only: centralOnly, min_duration: minDuration, sort: catalogSort, saros: Number(sarosFilter) || 0 });
     if (fromYear < -1999 || toYear > 3000 || fromYear > toYear) {
+      trackEvent('catalog_result', { status: 'invalid' });
       setCatalogError('Use a valid range from 1999 BCE to 3000 CE.');
       return;
     }
     if (visibleHere && !selected) {
+      trackEvent('catalog_result', { status: 'invalid' });
       setCatalogError('Choose a location first.');
       return;
     }
     if (visibleHere && toYear - fromYear > 300) {
+      trackEvent('catalog_result', { status: 'invalid' });
       setCatalogError('Location searches are limited to 300 years at a time.');
       return;
     }
@@ -1343,9 +1381,11 @@ export default function EclipseExplorer() {
         if (catalogSort === 'magnitude') return b.magnitude - a.magnitude;
         return compareEclipseDates(a.date, b.date);
       });
+      trackEvent('catalog_result', { status: 'success', count: filtered.length, duration_ms: Math.round(performance.now() - startedAt) });
       setCatalogResults(filtered);
       setCatalogSearched(true);
     } catch (error) {
+      trackEvent('catalog_result', { status: 'error' });
       setCatalogError(error instanceof Error ? error.message : 'The catalog could not be searched.');
     } finally {
       setCatalogLoading(false);
@@ -1374,18 +1414,22 @@ export default function EclipseExplorer() {
         const lat = Number(coordinateMatch[1]);
         const lon = Number(coordinateMatch[2]);
         if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
-          choosePoint(lat, lon);
+          trackEvent('place_search', { mode: 'coordinates' });
+          choosePoint(lat, lon, 'Selected point', undefined, undefined, 'coordinates');
           setDrawer(null);
           return;
         }
       }
+      trackEvent('place_search', { mode: 'name' });
       setPlaceLoading(true);
       setPlaceError('');
       try {
         const results = await searchPlaces(placeQuery.trim());
+        trackEvent('place_search_result', { status: 'success', count: results.length });
         setPlaceResults(results);
         if (!results.length) setPlaceError('No places found. Try a region or country.');
       } catch {
+        trackEvent('place_search_result', { status: 'error' });
         setPlaceError('Place search is temporarily unavailable.');
       } finally {
         setPlaceLoading(false);
@@ -1397,28 +1441,31 @@ export default function EclipseExplorer() {
   const submitCoordinates = useCallback(
     (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
+      trackEvent('place_search', { mode: 'coordinates' });
       const values = new FormData(event.currentTarget);
       const lat = Number(values.get('latitude'));
       const lon = Number(values.get('longitude'));
       if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+        trackEvent('place_search_result', { status: 'invalid' });
         setPlaceError('Use a latitude from −90 to 90 and longitude from −180 to 180.');
         return;
       }
       setPlaceError('');
-      choosePoint(lat, lon);
+      choosePoint(lat, lon, 'Selected point', undefined, undefined, 'coordinates');
       setDrawer(null);
     },
     [choosePoint],
   );
 
   const choosePlace = useCallback(
-    (place: PlaceResult | SelectedLocation) => {
+    (place: PlaceResult | SelectedLocation, source = 'saved') => {
       choosePoint(
         place.lat,
         place.lon,
         place.name,
         'accuracy' in place ? place.accuracy : undefined,
         'elevation' in place ? place.elevation : undefined,
+        source,
       );
       setDrawer(null);
     },
@@ -1435,6 +1482,7 @@ export default function EclipseExplorer() {
           (place) => Math.abs(place.lat - selected.lat) >= 0.00001 || Math.abs(place.lon - selected.lon) >= 0.00001,
         )
       : [selected, ...savedPlaces].slice(0, 12);
+    trackEvent('location_save', { action: exists ? 'remove' : 'save', count: next.length });
     setSavedPlaces(next);
     localStorage.setItem('umbra-saved-places', JSON.stringify(next));
     showToast(exists ? 'Place removed' : 'Place saved on this device');
@@ -1442,6 +1490,7 @@ export default function EclipseExplorer() {
 
   const updateSelectedElevation = useCallback(
     (elevation: number) => {
+      trackDebounced('location_elevation');
       setElevationStatus('provided');
       setProfile(null);
       setProfileLoading(false);
@@ -1460,12 +1509,16 @@ export default function EclipseExplorer() {
   );
 
   const copyText = useCallback(
-    async (value: string, message = 'Copied') => {
+    async (value: string, message = 'Copied', kind = 'embed') => {
       try {
         await navigator.clipboard.writeText(value);
+        trackEvent('copy', { kind, status: 'success' });
         showToast(message);
+        return true;
       } catch {
+        trackEvent('copy', { kind, status: 'error' });
         showToast('Copy failed');
+        return false;
       }
     },
     [showToast],
@@ -1485,225 +1538,241 @@ export default function EclipseExplorer() {
       text: selected ? selected.name + ': ' + localSummary : 'Explore this solar eclipse',
       url: window.location.href,
     };
+    const method = typeof navigator.share === 'function' ? 'native' : 'clipboard';
+    trackEvent('share', { method, status: 'requested' });
     try {
-      if (navigator.share) await navigator.share(payload);
-      else await copyText(window.location.href, 'Link copied');
-    } catch {
-      // Sharing was cancelled.
+      if (navigator.share) {
+        await navigator.share(payload);
+        trackEvent('share', { method, status: 'success' });
+      } else {
+        const copied = await copyText(window.location.href, 'Link copied', 'share_link');
+        trackEvent('share', { method, status: copied ? 'success' : 'error' });
+      }
+    } catch (error) {
+      trackEvent('share', { method, status: error instanceof Error && error.name === 'AbortError' ? 'cancelled' : 'error' });
     }
   }, [data, selected, local, timezone, timezoneOverride, copyText]);
 
   const exportData = useCallback(
     async (kind: 'geojson' | 'kml' | 'kmz' | 'gpx' | 'csv' | 'ics') => {
       if (!data) return;
-      const baseName = 'solar-eclipse-' + data.date;
-      const coordinates = (points: Array<{ lat: number; lon: number }>) =>
-        points.map((point) => point.lon.toFixed(6) + ',' + point.lat.toFixed(6)).join(' ');
-      const polygonCoordinates = (points: Array<{ lat: number; lon: number }>) => {
-        const ring = points.map((point) => [point.lon, point.lat]);
-        if (
-          ring.length &&
-          (ring[0][0] !== ring[ring.length - 1][0] || ring[0][1] !== ring[ring.length - 1][1])
-        ) {
-          ring.push([...ring[0]]);
+      trackEvent('export', { format: kind, status: 'requested', eclipse: data.date, has_location: !!selected });
+      try {
+        const baseName = 'solar-eclipse-' + data.date;
+        const coordinates = (points: Array<{ lat: number; lon: number }>) =>
+          points.map((point) => point.lon.toFixed(6) + ',' + point.lat.toFixed(6)).join(' ');
+        const polygonCoordinates = (points: Array<{ lat: number; lon: number }>) => {
+          const ring = points.map((point) => [point.lon, point.lat]);
+          if (
+            ring.length &&
+            (ring[0][0] !== ring[ring.length - 1][0] || ring[0][1] !== ring[ring.length - 1][1])
+          ) {
+            ring.push([...ring[0]]);
+          }
+          return ring;
+        };
+        const buildKml = () => {
+          const centerLineKml = data.geometry.centralLine.length >= 2
+            ? '<Placemark><name>Center line</name><LineString><tessellate>1</tessellate><coordinates>' +
+              coordinates(data.geometry.centralLine) +
+              '</coordinates></LineString></Placemark>'
+            : '';
+          const centralPathKml = data.geometry.umbra.length >= 3
+            ? '<Placemark><name>Central path</name><Polygon><outerBoundaryIs><LinearRing><coordinates>' +
+              coordinates([...data.geometry.umbra, data.geometry.umbra[0]]) +
+              '</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>'
+            : '';
+          const visibilityKml = data.geometry.penumbra.length >= 3
+            ? '<Placemark><name>Partial visibility</name><Polygon><outerBoundaryIs><LinearRing><coordinates>' +
+              coordinates([...data.geometry.penumbra, data.geometry.penumbra[0]]) +
+              '</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>'
+            : '';
+          return (
+            '<?xml version="1.0" encoding="UTF-8"?>' +
+            '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>' +
+            '<name>' + xmlEscape(formatDateLabel(data.date) + ' solar eclipse') + '</name>' +
+            centerLineKml +
+            centralPathKml +
+            visibilityKml +
+            '</Document></kml>'
+          );
+        };
+        if (kind === 'geojson') {
+          const features: object[] = [];
+          if (data.geometry.umbra.length >= 3) {
+            features.push({
+              type: 'Feature',
+              properties: { name: 'Central path', eclipse: data.date, type: data.type },
+              geometry: {
+                type: 'Polygon',
+                coordinates: [polygonCoordinates(data.geometry.umbra)],
+              },
+            });
+          }
+          if (data.geometry.centralLine.length >= 2) {
+            features.push({
+              type: 'Feature',
+              properties: { name: 'Center line', eclipse: data.date },
+              geometry: {
+                type: 'LineString',
+                coordinates: data.geometry.centralLine.map((point) => [point.lon, point.lat]),
+              },
+            });
+          }
+          if (data.geometry.penumbra.length >= 3) {
+            features.push({
+              type: 'Feature',
+              properties: { name: 'Partial visibility', eclipse: data.date },
+              geometry: {
+                type: 'Polygon',
+                coordinates: [polygonCoordinates(data.geometry.penumbra)],
+              },
+            });
+          }
+          if (selected) {
+            features.push({
+              type: 'Feature',
+              properties: { name: selected.name, elevation: selected.elevation },
+              geometry: { type: 'Point', coordinates: [selected.lon, selected.lat] },
+            });
+          }
+          downloadText(
+            baseName + '.geojson',
+            'application/geo+json',
+            JSON.stringify({ type: 'FeatureCollection', features }, null, 2),
+          );
+        } else if (kind === 'kml') {
+          downloadText(baseName + '.kml', 'application/vnd.google-earth.kml+xml', buildKml());
+        } else if (kind === 'kmz') {
+          const { default: JSZip } = await import('jszip');
+          const archive = new JSZip();
+          archive.file('doc.kml', buildKml());
+          downloadBlob(
+            baseName + '.kmz',
+            await archive.generateAsync({
+              type: 'blob',
+              compression: 'DEFLATE',
+              mimeType: 'application/vnd.google-earth.kmz',
+            }),
+          );
+        } else if (kind === 'gpx') {
+          const trackPoints = data.geometry.centralLine.length
+            ? data.geometry.centralLine
+            : data.geometry.penumbra;
+          if (trackPoints.length < 2) {
+            trackEvent('export', { format: kind, status: 'unavailable' });
+            showToast('No path geometry is available for this eclipse');
+            return;
+          }
+          const trackName = data.geometry.centralLine.length
+            ? 'Solar eclipse center line'
+            : 'Partial visibility boundary';
+          const track = trackPoints
+            .map((point) => '<trkpt lat="' + point.lat.toFixed(6) + '" lon="' + point.lon.toFixed(6) + '"/>')
+            .join('');
+          const gpx =
+            '<?xml version="1.0" encoding="UTF-8"?>' +
+            '<gpx version="1.1" creator="Umbra" xmlns="http://www.topografix.com/GPX/1/1">' +
+            '<metadata><name>' + xmlEscape(formatDateLabel(data.date) + ' path') + '</name></metadata>' +
+            '<trk><name>' + trackName + '</name><trkseg>' + track + '</trkseg></trk></gpx>';
+          downloadText(baseName + '.gpx', 'application/gpx+xml', gpx);
+        } else if (kind === 'csv') {
+          if (!local || !selected) {
+            trackEvent('export', { format: kind, status: 'needs_location' });
+            showToast('Choose a location to export local contacts');
+            return;
+          }
+          const localZone = timezoneOverride || timezone;
+          const generatedAt = new Date().toISOString();
+          const rows = [
+            [
+              'schema_version',
+              'generated_at',
+              'eclipse_date',
+              'global_type',
+              'saros',
+              'site_name',
+              'latitude_deg',
+              'longitude_deg',
+              'elevation_m',
+              'timezone',
+              'local_type',
+              'contact',
+              'utc_time',
+              'local_time',
+              'altitude_deg',
+              'azimuth_deg',
+              'magnitude',
+              'obscuration',
+            ],
+            ...local.contacts.map((contact) => [
+              '1',
+              generatedAt,
+              data.date,
+              data.type,
+              data.saros,
+              selected.name,
+              selected.lat.toFixed(6),
+              selected.lon.toFixed(6),
+              selected.elevation.toFixed(1),
+              localZone,
+              local.type,
+              contact.shortLabel,
+              contact.date.toISOString(),
+              formatTime(contact.date, localZone),
+              contact.altitude.toFixed(3),
+              contact.azimuth.toFixed(3),
+              contact.magnitude.toFixed(6),
+              contact.obscuration.toFixed(6),
+            ]),
+          ];
+          downloadText(
+            baseName + '-' + selected.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() + '.csv',
+            'text/csv',
+            rows.map((row) => row.map(csvCell).join(',')).join('\n'),
+          );
+        } else {
+          const first = local?.contacts.find((contact) => contact.key === 'c1')?.date ?? data.rangeStart;
+          const last = local?.contacts.find((contact) => contact.key === 'c4')?.date ?? data.rangeEnd;
+          const localKind = local?.type && local.type !== 'none'
+            ? local.type.charAt(0).toUpperCase() + local.type.slice(1)
+            : TYPE_LABELS[data.type];
+          const description = [
+            local && selected ? typeSentence(local.type, observability(local)) + ' from ' + selected.name + '.' : TYPE_LABELS[data.type] + ' solar eclipse.',
+            local?.maximum ? percent(local.obscuration) + ' of the Sun covered at maximum ' + formatTime(local.maximum.date, timezoneOverride || timezone) + '.' : '',
+            local?.maximum ? 'Sun ' + local.maximum.altitude.toFixed(1) + '° high toward ' + Math.round(local.maximum.azimuth) + '°.' : '',
+            local ? safetySentence(local.type, observability(local)) : 'Use certified eclipse eye protection.',
+            'Check weather and official local guidance before travel.',
+          ].filter(Boolean).join(' ');
+          const uidLocation = selected
+            ? '-' + selected.lat.toFixed(5).replace('-', 'm') + '-' + selected.lon.toFixed(5).replace('-', 'm')
+            : '-global';
+          const ics = [
+            'BEGIN:VCALENDAR',
+            'VERSION:2.0',
+            'PRODID:-//Umbra//Solar Eclipse Atlas//EN',
+            'BEGIN:VEVENT',
+            'UID:' + data.date + uidLocation + '@umbra.eclipse',
+            'DTSTAMP:' + icsDate(new Date()),
+            'DTSTART:' + icsDate(first),
+            'DTEND:' + icsDate(last),
+            'SUMMARY:' + icsEscape(localKind + ' solar eclipse' + (selected ? ' · ' + selected.name : '')),
+            'DESCRIPTION:' + icsEscape(description),
+            selected ? 'LOCATION:' + icsEscape(selected.name) : '',
+            'URL:' + icsEscape(window.location.href),
+            'END:VEVENT',
+            'END:VCALENDAR',
+          ]
+            .filter(Boolean)
+            .join('\r\n');
+          downloadText(baseName + '.ics', 'text/calendar', ics);
         }
-        return ring;
-      };
-      const buildKml = () => {
-        const centerLineKml = data.geometry.centralLine.length >= 2
-          ? '<Placemark><name>Center line</name><LineString><tessellate>1</tessellate><coordinates>' +
-            coordinates(data.geometry.centralLine) +
-            '</coordinates></LineString></Placemark>'
-          : '';
-        const centralPathKml = data.geometry.umbra.length >= 3
-          ? '<Placemark><name>Central path</name><Polygon><outerBoundaryIs><LinearRing><coordinates>' +
-            coordinates([...data.geometry.umbra, data.geometry.umbra[0]]) +
-            '</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>'
-          : '';
-        const visibilityKml = data.geometry.penumbra.length >= 3
-          ? '<Placemark><name>Partial visibility</name><Polygon><outerBoundaryIs><LinearRing><coordinates>' +
-            coordinates([...data.geometry.penumbra, data.geometry.penumbra[0]]) +
-            '</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>'
-          : '';
-        return (
-          '<?xml version="1.0" encoding="UTF-8"?>' +
-          '<kml xmlns="http://www.opengis.net/kml/2.2"><Document>' +
-          '<name>' + xmlEscape(formatDateLabel(data.date) + ' solar eclipse') + '</name>' +
-          centerLineKml +
-          centralPathKml +
-          visibilityKml +
-          '</Document></kml>'
-        );
-      };
-      if (kind === 'geojson') {
-        const features: object[] = [];
-        if (data.geometry.umbra.length >= 3) {
-          features.push({
-            type: 'Feature',
-            properties: { name: 'Central path', eclipse: data.date, type: data.type },
-            geometry: {
-              type: 'Polygon',
-              coordinates: [polygonCoordinates(data.geometry.umbra)],
-            },
-          });
-        }
-        if (data.geometry.centralLine.length >= 2) {
-          features.push({
-            type: 'Feature',
-            properties: { name: 'Center line', eclipse: data.date },
-            geometry: {
-              type: 'LineString',
-              coordinates: data.geometry.centralLine.map((point) => [point.lon, point.lat]),
-            },
-          });
-        }
-        if (data.geometry.penumbra.length >= 3) {
-          features.push({
-            type: 'Feature',
-            properties: { name: 'Partial visibility', eclipse: data.date },
-            geometry: {
-              type: 'Polygon',
-              coordinates: [polygonCoordinates(data.geometry.penumbra)],
-            },
-          });
-        }
-        if (selected) {
-          features.push({
-            type: 'Feature',
-            properties: { name: selected.name, elevation: selected.elevation },
-            geometry: { type: 'Point', coordinates: [selected.lon, selected.lat] },
-          });
-        }
-        downloadText(
-          baseName + '.geojson',
-          'application/geo+json',
-          JSON.stringify({ type: 'FeatureCollection', features }, null, 2),
-        );
-      } else if (kind === 'kml') {
-        downloadText(baseName + '.kml', 'application/vnd.google-earth.kml+xml', buildKml());
-      } else if (kind === 'kmz') {
-        const { default: JSZip } = await import('jszip');
-        const archive = new JSZip();
-        archive.file('doc.kml', buildKml());
-        downloadBlob(
-          baseName + '.kmz',
-          await archive.generateAsync({
-            type: 'blob',
-            compression: 'DEFLATE',
-            mimeType: 'application/vnd.google-earth.kmz',
-          }),
-        );
-      } else if (kind === 'gpx') {
-        const trackPoints = data.geometry.centralLine.length
-          ? data.geometry.centralLine
-          : data.geometry.penumbra;
-        if (trackPoints.length < 2) {
-          showToast('No path geometry is available for this eclipse');
-          return;
-        }
-        const trackName = data.geometry.centralLine.length
-          ? 'Solar eclipse center line'
-          : 'Partial visibility boundary';
-        const track = trackPoints
-          .map((point) => '<trkpt lat="' + point.lat.toFixed(6) + '" lon="' + point.lon.toFixed(6) + '"/>')
-          .join('');
-        const gpx =
-          '<?xml version="1.0" encoding="UTF-8"?>' +
-          '<gpx version="1.1" creator="Umbra" xmlns="http://www.topografix.com/GPX/1/1">' +
-          '<metadata><name>' + xmlEscape(formatDateLabel(data.date) + ' path') + '</name></metadata>' +
-          '<trk><name>' + trackName + '</name><trkseg>' + track + '</trkseg></trk></gpx>';
-        downloadText(baseName + '.gpx', 'application/gpx+xml', gpx);
-      } else if (kind === 'csv') {
-        if (!local || !selected) {
-          showToast('Choose a location to export local contacts');
-          return;
-        }
-        const localZone = timezoneOverride || timezone;
-        const generatedAt = new Date().toISOString();
-        const rows = [
-          [
-            'schema_version',
-            'generated_at',
-            'eclipse_date',
-            'global_type',
-            'saros',
-            'site_name',
-            'latitude_deg',
-            'longitude_deg',
-            'elevation_m',
-            'timezone',
-            'local_type',
-            'contact',
-            'utc_time',
-            'local_time',
-            'altitude_deg',
-            'azimuth_deg',
-            'magnitude',
-            'obscuration',
-          ],
-          ...local.contacts.map((contact) => [
-            '1',
-            generatedAt,
-            data.date,
-            data.type,
-            data.saros,
-            selected.name,
-            selected.lat.toFixed(6),
-            selected.lon.toFixed(6),
-            selected.elevation.toFixed(1),
-            localZone,
-            local.type,
-            contact.shortLabel,
-            contact.date.toISOString(),
-            formatTime(contact.date, localZone),
-            contact.altitude.toFixed(3),
-            contact.azimuth.toFixed(3),
-            contact.magnitude.toFixed(6),
-            contact.obscuration.toFixed(6),
-          ]),
-        ];
-        downloadText(
-          baseName + '-' + selected.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() + '.csv',
-          'text/csv',
-          rows.map((row) => row.map(csvCell).join(',')).join('\n'),
-        );
-      } else {
-        const first = local?.contacts.find((contact) => contact.key === 'c1')?.date ?? data.rangeStart;
-        const last = local?.contacts.find((contact) => contact.key === 'c4')?.date ?? data.rangeEnd;
-        const localKind = local?.type && local.type !== 'none'
-          ? local.type.charAt(0).toUpperCase() + local.type.slice(1)
-          : TYPE_LABELS[data.type];
-        const description = [
-          local && selected ? typeSentence(local.type, observability(local)) + ' from ' + selected.name + '.' : TYPE_LABELS[data.type] + ' solar eclipse.',
-          local?.maximum ? percent(local.obscuration) + ' of the Sun covered at maximum ' + formatTime(local.maximum.date, timezoneOverride || timezone) + '.' : '',
-          local?.maximum ? 'Sun ' + local.maximum.altitude.toFixed(1) + '° high toward ' + Math.round(local.maximum.azimuth) + '°.' : '',
-          local ? safetySentence(local.type, observability(local)) : 'Use certified eclipse eye protection.',
-          'Check weather and official local guidance before travel.',
-        ].filter(Boolean).join(' ');
-        const uidLocation = selected
-          ? '-' + selected.lat.toFixed(5).replace('-', 'm') + '-' + selected.lon.toFixed(5).replace('-', 'm')
-          : '-global';
-        const ics = [
-          'BEGIN:VCALENDAR',
-          'VERSION:2.0',
-          'PRODID:-//Umbra//Solar Eclipse Atlas//EN',
-          'BEGIN:VEVENT',
-          'UID:' + data.date + uidLocation + '@umbra.eclipse',
-          'DTSTAMP:' + icsDate(new Date()),
-          'DTSTART:' + icsDate(first),
-          'DTEND:' + icsDate(last),
-          'SUMMARY:' + icsEscape(localKind + ' solar eclipse' + (selected ? ' · ' + selected.name : '')),
-          'DESCRIPTION:' + icsEscape(description),
-          selected ? 'LOCATION:' + icsEscape(selected.name) : '',
-          'URL:' + icsEscape(window.location.href),
-          'END:VEVENT',
-          'END:VCALENDAR',
-        ]
-          .filter(Boolean)
-          .join('\r\n');
-        downloadText(baseName + '.ics', 'text/calendar', ics);
+        trackEvent('export', { format: kind, status: 'success', eclipse: data.date, has_location: !!selected });
+        showToast(kind.toUpperCase() + ' downloaded');
+      } catch {
+        trackEvent('export', { format: kind, status: 'error' });
+        showToast('The export could not be created. Try again.');
       }
-      showToast(kind.toUpperCase() + ' downloaded');
     },
     [data, selected, local, timezone, timezoneOverride, showToast],
   );
@@ -1714,23 +1783,26 @@ export default function EclipseExplorer() {
         showToast('This eclipse is already on the map');
         return;
       }
-      setComparisonDates((current) => {
-        if (current.includes(date)) return current.filter((item) => item !== date);
-        if (current.length >= 3) {
-          showToast('Compare up to three eclipses');
-          return current;
-        }
-        return [...current, date];
-      });
+      const removing = comparisonDates.includes(date);
+      if (!removing && comparisonDates.length >= 3) {
+        trackEvent('comparison_change', { action: 'limit', count: comparisonDates.length });
+        showToast('Compare up to three eclipses');
+        return;
+      }
+      const next = removing ? comparisonDates.filter((item) => item !== date) : [...comparisonDates, date];
+      trackEvent('comparison_change', { action: removing ? 'remove' : 'add', eclipse: date, count: next.length });
+      setComparisonDates(next);
     },
-    [eventDate, showToast],
+    [eventDate, comparisonDates, showToast],
   );
 
   const setLayer = (key: keyof LayerVisibility, value: boolean) => {
+    trackEvent('layer_toggle', { layer: key, enabled: value });
     setLayers((current) => ({ ...current, [key]: value }));
   };
 
   const applyLayerPreset = (preset: LayerPreset) => {
+    trackEvent('layer_preset', { preset });
     setLayers({ ...LAYER_PRESETS[preset] });
   };
 
@@ -1743,6 +1815,7 @@ export default function EclipseExplorer() {
   const cycleSheet = () => {
     const next = sheetSnap === 'peek' ? 'mid' : sheetSnap === 'mid' ? 'full' : 'peek';
     if (next === 'peek') eventPanelScrollRef.current?.scrollTo({ top: 0 });
+    trackEvent('sheet_resize', { size: next, source: 'button' });
     setSheetSnap(next);
   };
 
@@ -1790,6 +1863,7 @@ export default function EclipseExplorer() {
         const direction = Math.abs(delta) >= 32 ? (delta > 0 ? 1 : -1) : 0;
         const next = Math.max(0, Math.min(order.length - 1, current + direction));
         if (order[next] === 'peek') eventPanelScrollRef.current?.scrollTo({ top: 0 });
+        trackEvent('sheet_resize', { size: order[next], source: 'drag' });
         setSheetSnap(order[next]);
         lastSheetDragAtRef.current = performance.now();
       }
@@ -1867,7 +1941,7 @@ export default function EclipseExplorer() {
         <button
           className="brand"
           type="button"
-          onClick={() => data && mapRef.current && fitEclipse(mapRef.current, data, window.innerWidth > 760 ? 410 : 0)}
+          onClick={() => { trackEvent('map_fit'); if (data && mapRef.current) fitEclipse(mapRef.current, data, window.innerWidth > 760 ? 410 : 0); }}
           aria-label="Umbra — fit the eclipse path"
         >
           <span className="brand-eclipse" aria-hidden="true"><span /></span>
@@ -1990,7 +2064,7 @@ export default function EclipseExplorer() {
                     <button
                       className="recent-place"
                       type="button"
-                      onClick={() => choosePoint(savedPlaces[0].lat, savedPlaces[0].lon, savedPlaces[0].name, savedPlaces[0].accuracy, savedPlaces[0].elevation)}
+                      onClick={() => choosePlace(savedPlaces[0], 'saved')}
                     >
                       <Bookmark size={14} fill="currentColor" aria-hidden="true" /> Saved: {savedPlaces[0].name}
                     </button>
@@ -2046,6 +2120,7 @@ export default function EclipseExplorer() {
                       <button
                         type="button"
                         onClick={() => {
+                          trackEvent('map_fit');
                           setSheetSnap('peek');
                           if (data && mapRef.current) fitEclipse(mapRef.current, data, window.innerWidth > 760 ? 410 : 0);
                         }}
@@ -2136,8 +2211,8 @@ export default function EclipseExplorer() {
                           <small>{displayZone === 'UTC' ? 'Universal time' : displayZone.replaceAll('_', ' ')}</small>
                         </div>
                         <div className="segmented mini">
-                          <button className={timeMode === 'local' ? 'active' : ''} type="button" aria-pressed={timeMode === 'local'} onClick={() => setTimeMode('local')}>Local</button>
-                          <button className={timeMode === 'utc' ? 'active' : ''} type="button" aria-pressed={timeMode === 'utc'} onClick={() => setTimeMode('utc')}>UTC</button>
+                          <button className={timeMode === 'local' ? 'active' : ''} type="button" aria-pressed={timeMode === 'local'} onClick={() => { trackEvent('preference_change', { preference: 'clock', value: 'local' }); setTimeMode('local'); }}>Local</button>
+                          <button className={timeMode === 'utc' ? 'active' : ''} type="button" aria-pressed={timeMode === 'utc'} onClick={() => { trackEvent('preference_change', { preference: 'clock', value: 'utc' }); setTimeMode('utc'); }}>UTC</button>
                         </div>
                       </div>
                       <div className="contact-list">
@@ -2150,6 +2225,7 @@ export default function EclipseExplorer() {
                             onClick={() => {
                               setPlaying(false);
                               setTimelineIntent('manual');
+                              trackEvent('timeline_seek', { source: 'contact', target: contact.key });
                               setTimeMs(contact.date.getTime());
                             }}
                           >
@@ -2169,7 +2245,7 @@ export default function EclipseExplorer() {
                         loading={upcomingLoading}
                         error={upcomingError}
                         afterDate={eventDate}
-                        onOpen={changeEvent}
+                        onOpen={(date) => changeEvent(date, 'upcoming')}
                         onBrowse={openVisibleEclipses}
                       />
 
@@ -2178,10 +2254,10 @@ export default function EclipseExplorer() {
                         selected={selected}
                         bestKey={bestComparisonKey}
                         timeMode={timeMode}
-                        onChoose={choosePlace}
+                        onChoose={(place) => choosePlace(place, 'comparison')}
                       />
 
-                      <details className="precision-details">
+                      <details className="precision-details" onToggle={(event) => trackEvent('detail_toggle', { section: 'precision', open: event.currentTarget.open })}>
                         <summary>Planning details <ChevronDown size={15} aria-hidden="true" /></summary>
                         <dl>
                           <div><dt>Magnitude</dt><dd>{local.magnitude.toFixed(4)}</dd></div>
@@ -2222,7 +2298,7 @@ export default function EclipseExplorer() {
                             <dd>
                               <select
                                 value={timezoneOverride || timezone}
-                                onChange={(event) => setTimezoneOverride(event.target.value)}
+                                onChange={(event) => { trackEvent('location_timezone'); setTimezoneOverride(event.target.value); }}
                                 aria-label="Observer time zone"
                               >
                                 {!supportedTimezones.includes(timezone) && <option value={timezone}>{timezone}</option>}
@@ -2242,7 +2318,7 @@ export default function EclipseExplorer() {
                         loading={upcomingLoading}
                         error={upcomingError}
                         afterDate={eventDate}
-                        onOpen={changeEvent}
+                        onOpen={(date) => changeEvent(date, 'upcoming')}
                         onBrowse={openVisibleEclipses}
                       />
                       <LocationComparison
@@ -2250,14 +2326,14 @@ export default function EclipseExplorer() {
                         selected={selected}
                         bestKey={bestComparisonKey}
                         timeMode={timeMode}
-                        onChoose={choosePlace}
+                        onChoose={(place) => choosePlace(place, 'comparison')}
                       />
                     </>
                   )}
 
                   <nav className="location-map-links" aria-label="Open selected location in another map">
                     <a
-                      href={'https://www.google.com/maps/search/?api=1&query=' + selected.lat + ',' + selected.lon}
+                      onClick={() => trackEvent('outbound_link', { destination: 'google_maps' })} href={'https://www.google.com/maps/search/?api=1&query=' + selected.lat + ',' + selected.lon}
                       target="_blank"
                       rel="noreferrer"
                     >
@@ -2265,7 +2341,7 @@ export default function EclipseExplorer() {
                     </a>
                     <span aria-hidden="true">·</span>
                     <a
-                      href={'https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=' + selected.lat + ',' + selected.lon}
+                      onClick={() => trackEvent('outbound_link', { destination: 'street_view' })} href={'https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=' + selected.lat + ',' + selected.lon}
                       target="_blank"
                       rel="noreferrer"
                     >
@@ -2320,7 +2396,7 @@ export default function EclipseExplorer() {
         <button
           className="square-button"
           type="button"
-          onClick={() => data && mapRef.current && fitEclipse(mapRef.current, data, window.innerWidth > 760 ? 410 : 0)}
+          onClick={() => { trackEvent('map_fit'); if (data && mapRef.current) fitEclipse(mapRef.current, data, window.innerWidth > 760 ? 410 : 0); }}
           aria-label="Fit eclipse path"
         >
           <Globe2 size={19} aria-hidden="true" />
@@ -2370,6 +2446,7 @@ export default function EclipseExplorer() {
               onChange={(event) => {
                 setPlaying(false);
                 setTimelineIntent('manual');
+                trackDebounced('timeline_seek', { source: 'slider', target: 'custom' });
                 setTimeMs(Number(event.target.value));
               }}
               aria-label="Eclipse time"
@@ -2406,6 +2483,7 @@ export default function EclipseExplorer() {
             type="button"
             onClick={() => {
               setPlaying(false);
+              trackEvent('timeline_seek', { source: 'reset', target: nowAvailable ? 'now' : 'maximum' });
               if (nowAvailable) {
                 setTimelineIntent('now');
                 setTimeMs(Date.now());
@@ -2418,7 +2496,7 @@ export default function EclipseExplorer() {
           >
             {nowAvailable ? 'Now' : 'Max'}
           </button>
-          <button className="timeline-time-mode" type="button" onClick={() => setTimeMode(timeMode === 'local' ? 'utc' : 'local')}>
+          <button className="timeline-time-mode" type="button" onClick={() => { const value = timeMode === 'local' ? 'utc' : 'local'; trackEvent('preference_change', { preference: 'clock', value }); setTimeMode(value); }}>
             {timeMode === 'local' && selected ? 'Local' : 'UTC'}
           </button>
         </section>
@@ -2474,7 +2552,7 @@ export default function EclipseExplorer() {
                   />
                   {placeLoading && <span className="tiny-spinner" aria-label="Searching" />}
                 </form>
-                <details className="coordinate-search">
+                <details className="coordinate-search" onToggle={(event) => trackEvent('detail_toggle', { section: 'coordinates', open: event.currentTarget.open })}>
                   <summary>Enter coordinates <ChevronDown size={15} aria-hidden="true" /></summary>
                   <form onSubmit={submitCoordinates}>
                     <label>
@@ -2489,7 +2567,7 @@ export default function EclipseExplorer() {
                     <button
                       type="button"
                       onClick={() => {
-                        choosePoint(mapCenter.lat, mapCenter.lon);
+                        choosePoint(mapCenter.lat, mapCenter.lon, 'Selected point', undefined, undefined, 'map_center');
                         setDrawer(null);
                       }}
                     >
@@ -2502,7 +2580,7 @@ export default function EclipseExplorer() {
                   <div className="place-list">
                     <span className="list-label">Results</span>
                     {placeResults.map((place) => (
-                      <button key={place.id} type="button" onClick={() => choosePlace(place)}>
+                      <button key={place.id} type="button" onClick={() => choosePlace(place, 'search_result')}>
                         <MapPin size={16} aria-hidden="true" />
                         <span><strong>{place.name}</strong><small>{place.subtitle}</small></span>
                         <ChevronRight size={16} aria-hidden="true" />
@@ -2514,7 +2592,7 @@ export default function EclipseExplorer() {
                   <div className="place-list saved-list">
                     <span className="list-label">Saved on this device</span>
                     {savedPlaces.map((place, index) => (
-                      <button key={place.lat + ':' + place.lon + ':' + index} type="button" onClick={() => choosePlace(place)}>
+                      <button key={place.lat + ':' + place.lon + ':' + index} type="button" onClick={() => choosePlace(place, 'saved')}>
                         <Bookmark size={15} fill="currentColor" aria-hidden="true" />
                         <span><strong>{place.name}</strong><small>{formatCoordinate(place.lat, true)} · {formatCoordinate(place.lon, false)}</small></span>
                         <ChevronRight size={16} aria-hidden="true" />
@@ -2567,7 +2645,7 @@ export default function EclipseExplorer() {
                     <span><strong>Central eclipse only</strong><small>Total or annular at this spot</small></span>
                   </label>
                 )}
-                <details className="filter-details">
+                <details className="filter-details" onToggle={(event) => trackEvent('detail_toggle', { section: 'catalog_filters', open: event.currentTarget.open })}>
                   <summary><ListFilter size={15} aria-hidden="true" /> More filters <ChevronDown size={15} aria-hidden="true" /></summary>
                   <div className="filter-grid">
                     <label><span>Minimum central phase</span><select value={minDuration} onChange={(event) => setMinDuration(Number(event.target.value))}><option value="0">Any duration</option><option value="1">1 minute</option><option value="3">3 minutes</option><option value="5">5 minutes</option><option value="7">7 minutes</option></select></label>
@@ -2638,7 +2716,7 @@ export default function EclipseExplorer() {
                   <span className="list-label">Base map</span>
                   <div className="base-map-grid">
                     {BASE_LABELS.map((item) => (
-                      <button className={baseMap === item.id ? 'active' : ''} type="button" key={item.id} onClick={() => setBaseMap(item.id)} aria-pressed={baseMap === item.id}>
+                      <button className={baseMap === item.id ? 'active' : ''} type="button" key={item.id} onClick={() => { trackEvent('map_style', { style: item.id }); setBaseMap(item.id); }} aria-pressed={baseMap === item.id}>
                         <span className={'base-preview preview-' + item.id} />
                         <strong>{item.label}</strong>
                         <small>{item.detail}</small>
@@ -2647,7 +2725,7 @@ export default function EclipseExplorer() {
                     ))}
                   </div>
                 </section>
-                <details className="layer-details">
+                <details className="layer-details" onToggle={(event) => trackEvent('detail_toggle', { section: 'layers', open: event.currentTarget.open })}>
                   <summary>Individual layers <ChevronDown size={15} aria-hidden="true" /></summary>
                   <section className="settings-subsection">
                     <span className="list-label">Essential</span>
@@ -2663,7 +2741,7 @@ export default function EclipseExplorer() {
                     <ToggleRow label="Day, twilight & night" detail="Civil, nautical, astronomical" color="#536D74" checked={layers.night} onChange={(value) => setLayer('night', value)} />
                     <ToggleRow label="Night lights" detail="NASA Earth at Night" color="#536D74" checked={layers.lightPollution} onChange={(value) => setLayer('lightPollution', value)} />
                     {layers.lightPollution && (
-                      <label className="opacity-row"><span>Overlay strength</span><input type="range" min="0.15" max="0.95" step="0.05" value={nightOpacity} onChange={(event) => setNightOpacity(Number(event.target.value))} /></label>
+                      <label className="opacity-row"><span>Overlay strength</span><input type="range" min="0.15" max="0.95" step="0.05" value={nightOpacity} onChange={(event) => { trackDebounced('layer_opacity', { opacity: Number(event.target.value) }); setNightOpacity(Number(event.target.value)); }} /></label>
                     )}
                   </section>
                   <section className="settings-subsection">
@@ -2716,10 +2794,10 @@ export default function EclipseExplorer() {
                 </section>
                 <section className="action-section settings-inline">
                   <span className="list-label">Preferences</span>
-                  <div className="preference-row"><span>Distance</span><div className="segmented"><button type="button" className={distanceUnit === 'metric' ? 'active' : ''} aria-pressed={distanceUnit === 'metric'} onClick={() => setDistanceUnit('metric')}>km</button><button type="button" className={distanceUnit === 'imperial' ? 'active' : ''} aria-pressed={distanceUnit === 'imperial'} onClick={() => setDistanceUnit('imperial')}>mi</button></div></div>
-                  <div className="preference-row"><span>Clock</span><div className="segmented"><button type="button" className={timeMode === 'local' ? 'active' : ''} aria-pressed={timeMode === 'local'} onClick={() => setTimeMode('local')}>Local</button><button type="button" className={timeMode === 'utc' ? 'active' : ''} aria-pressed={timeMode === 'utc'} onClick={() => setTimeMode('utc')}>UTC</button></div></div>
+                  <div className="preference-row"><span>Distance</span><div className="segmented"><button type="button" className={distanceUnit === 'metric' ? 'active' : ''} aria-pressed={distanceUnit === 'metric'} onClick={() => { trackEvent('preference_change', { preference: 'distance', value: 'metric' }); setDistanceUnit('metric'); }}>km</button><button type="button" className={distanceUnit === 'imperial' ? 'active' : ''} aria-pressed={distanceUnit === 'imperial'} onClick={() => { trackEvent('preference_change', { preference: 'distance', value: 'imperial' }); setDistanceUnit('imperial'); }}>mi</button></div></div>
+                  <div className="preference-row"><span>Clock</span><div className="segmented"><button type="button" className={timeMode === 'local' ? 'active' : ''} aria-pressed={timeMode === 'local'} onClick={() => { trackEvent('preference_change', { preference: 'clock', value: 'local' }); setTimeMode('local'); }}>Local</button><button type="button" className={timeMode === 'utc' ? 'active' : ''} aria-pressed={timeMode === 'utc'} onClick={() => { trackEvent('preference_change', { preference: 'clock', value: 'utc' }); setTimeMode('utc'); }}>UTC</button></div></div>
                 </section>
-                <details className="about-details map-summary-details">
+                <details className="about-details map-summary-details" onToggle={(event) => trackEvent('detail_toggle', { section: 'text_summary', open: event.currentTarget.open })}>
                   <summary><Accessibility size={16} /> Text map summary <ChevronDown size={15} /></summary>
                   <div>
                     <p>{mapSummary}</p>
@@ -2736,7 +2814,7 @@ export default function EclipseExplorer() {
                     </p>
                   </div>
                 </details>
-                <details className="about-details">
+                <details className="about-details" onToggle={(event) => trackEvent('detail_toggle', { section: 'about', open: event.currentTarget.open })}>
                   <summary><Info size={16} /> About the calculations <ChevronDown size={15} /></summary>
                   <div>
                     <p>Predictions use Besselian elements from NASA’s Five Millennium Canon and astronomy-bundle 9.38.0. Coordinates use WGS84; times can be shown in UTC or the selected IANA time zone.</p>
@@ -2745,10 +2823,10 @@ export default function EclipseExplorer() {
                     <p>Small differences are expected from atmospheric refraction, terrain, ΔT, and the Moon’s irregular limb. Verify critical plans with an official source.</p>
                     <p className="safety-note"><Sun size={16} /> Use certified eclipse glasses whenever any bright part of the Sun is visible. Ordinary sunglasses are not safe.</p>
                     <div className="source-links">
-                      <a href="https://eclipse.gsfc.nasa.gov/SEcat5/SEcatalog.html" target="_blank" rel="noreferrer">NASA eclipse catalog <ExternalLink size={13} /></a>
-                      <a href="https://github.com/andrmoel/astronomy-bundle-js" target="_blank" rel="noreferrer">Calculation library <ExternalLink size={13} /></a>
-                      <a href="https://open-meteo.com/en/docs/elevation-api" target="_blank" rel="noreferrer">Terrain: Open-Meteo / Copernicus DEM <ExternalLink size={13} /></a>
-                      <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">Map attributions <ExternalLink size={13} /></a>
+                      <a onClick={() => trackEvent('outbound_link', { destination: 'nasa' })} href="https://eclipse.gsfc.nasa.gov/SEcat5/SEcatalog.html" target="_blank" rel="noreferrer">NASA eclipse catalog <ExternalLink size={13} /></a>
+                      <a onClick={() => trackEvent('outbound_link', { destination: 'astronomy_bundle' })} href="https://github.com/andrmoel/astronomy-bundle-js" target="_blank" rel="noreferrer">Calculation library <ExternalLink size={13} /></a>
+                      <a onClick={() => trackEvent('outbound_link', { destination: 'open_meteo' })} href="https://open-meteo.com/en/docs/elevation-api" target="_blank" rel="noreferrer">Terrain: Open-Meteo / Copernicus DEM <ExternalLink size={13} /></a>
+                      <a onClick={() => trackEvent('outbound_link', { destination: 'openstreetmap' })} href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">Map attributions <ExternalLink size={13} /></a>
                     </div>
                   </div>
                 </details>
@@ -2785,7 +2863,7 @@ function LocationComparison({
 }) {
   if (items.length < 2) return null;
   return (
-    <details className="place-comparison">
+    <details className="place-comparison" onToggle={(event) => trackEvent('detail_toggle', { section: 'location_comparison', open: event.currentTarget.open })}>
       <summary>
         Compare {items.length} locations
         <ChevronDown size={15} aria-hidden="true" />
@@ -2917,7 +2995,7 @@ function UpcomingEclipsesPanel({
             )}
           </div>
 
-          <details className="upcoming-partials">
+          <details className="upcoming-partials" onToggle={(event) => trackEvent('detail_toggle', { section: 'upcoming_partials', open: event.currentTarget.open })}>
             <summary>
               <span>Next partial eclipses</span>
               <ChevronDown size={15} aria-hidden="true" />
