@@ -141,3 +141,12 @@ test('excludes non-finite values and stops queued sends when the visitor opts ou
   h.api.trackEvent('map_fit');
   assert.equal(h.sent.length, 2);
 });
+
+
+test('collects the verified Sites production alias', async () => {
+  const h = harness({hostname:'umbra-eclipse-atlas.plhery.chatgpt.site'});
+  h.api.initializeAnalytics();
+  await h.load();
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].hostname, 'umbra-eclipse-atlas.plhery.chatgpt.site');
+});

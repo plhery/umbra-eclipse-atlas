@@ -1,7 +1,10 @@
 // Public website ID, not a credential. Analytics are enabled only on the live atlas.
 export const ANALYTICS_WEBSITE_ID = 'bc9f8fd4-11b5-4597-ba36-86232932e930';
 const ANALYTICS_ORIGIN = 'https://u.plhery.com';
-const PRODUCTION_HOSTS = ['umbra-eclipse.plhery.com'];
+const PRODUCTION_HOSTS = [
+  'umbra-eclipse.plhery.com',
+  'umbra-eclipse-atlas.plhery.chatgpt.site',
+];
 
 // Explicit property allowlists prevent coordinates, search text, and error messages
 // from accidentally reaching analytics when a call site is extended later.

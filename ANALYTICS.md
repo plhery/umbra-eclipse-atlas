@@ -9,7 +9,8 @@ The server runs in the existing Coolify Umami stack.
 
 `components/atlas-analytics.tsx` initializes the official Umami JavaScript SDK;
 `lib/analytics.ts` controls when it loads and what it sends. It runs only in a
-production build on the public hostname, respects Do Not Track, Global Privacy
+production build on `umbra-eclipse.plhery.com` or the production alias
+`umbra-eclipse-atlas.plhery.chatgpt.site`, respects Do Not Track, Global Privacy
 Control, and Umami's `localStorage['umami.disabled']` opt-out. Local development,
 previews, and builds served on another hostname do not collect analytics.
 
